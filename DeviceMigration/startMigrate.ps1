@@ -17,11 +17,8 @@ Jesse Weimer
 
 $ErrorActionPreference = "SilentlyContinue"
 
-# Move module to PSModule variable
-Move-Item "$($PSScriptRoot)\DeviceMigration.psm1" -Destination "$($env:ProgramFiles)\WindowsPowerShell\Modules\" -Force
-
 # Import module
-Import-Module DeviceMigration -Force
+Import-Module "$($PSScriptRoot)\DeviceMigration.psm1" -Force
 
 # Import config settings from JSON file
 $config = Get-Content "$($PSScriptRoot)\config.json" | ConvertFrom-Json
@@ -66,6 +63,21 @@ catch
     exitScript -exitCode 4 -functionName "msGraphAuthenticate"
 }
 
+# Authenticate to target tenant
+log "Authenticating to target tenant..."
+try
+{
+    $targetHeaders = msGraphAuthenticate -tenantName $config.targetTenant.tenantname -clientId $config.targetTenant.clientId -clientSecret $config.targetTenant.clientSecret
+    log "Authenticated to $($config.targetTenant.tenantName) target tenant successfully."
+}
+catch
+{
+    $message = $_.Exception.Message
+    log "Failed to authenticate to $($config.targetTenant.tenantName) target tenant. Error: $message"
+    log "Exiting script."
+    exitScript -exitCode 4 -functionName "msGraphAuthenticate"
+}
+
 # Check Microsoft account connection registry policy
 log "Checking Microsoft account connection registry policy..."
 $accountConnectionPath = "HKLM:\SOFTWARE\Microsoft\PolicyManager\current\device\Accounts"
@@ -80,6 +92,99 @@ if($accountConnectionValue -ne 1)
 else
 {
     log "Microsoft account connection registry policy is set."
+}
+
+function deviceObject()
+{
+    [CmdletBinding()]
+    Param(
+        [Parameter(Mandatory=$true)]
+        [object]$headers,
+        [string]$hostname = $env:COMPUTERNAME,
+        [string]$serialNumber = (Get-CimInstance -ClassName Win32_BIOS).SerialNumber,
+        [string]$azureAdJoined = (dsregcmd.exe /status | Select-String "AzureAdJoined").ToString().Split(":")[1].Trim(),
+        [string]$domainjoined = (dsregcmd.exe /status | Select-String "DomainJoined").ToString().Split(":")[1].Trim(),
+        [string]$certPath = "Cert:\LocalMachine\My",
+        [string]$intuneIssuer = "Microsoft Intune MDM Device CA",
+        [string]$azureIssuer = "MS-Organization-Access",
+        [string]$groupTag = $config.groupTag,
+        [string]$regPath = $config.regPath,
+        [bool]$mdm = $false
+    )
+    $cert = Get-ChildItem -Path $certPath | Where-Object {$_.Issuer -match $intuneIssuer}
+    if($cert)
+    {
+        $mdm = $true
+        $intuneId = ((Get-ChildItem $cert | Select-Object Subject).Subject).TrimStart("CN=")
+        $entraDeviceId = ((Get-ChildItem $certPath | Where-Object {$_.Issuer -match $azureIssuer} | Select-Object Subject).Subject).TrimStart("CN=")
+        $autopilotObject = (Invoke-RestMethod -Method Get -Uri "https://graph.microsoft.com/beta/deviceManagement/windowsAutopilotDeviceIdentities?`$filter=contains(serialNumber,'$($serialNumber)')" -Headers $headers)
+        if(($autopilotObject.'@odata.count') -eq 1)
+        {
+            $autopilotId = $autopilotObject.value.id
+            if([string]::IsNullOrEmpty($groupTag))
+            {
+                $groupTag = $autopilotObject.value.groupTag
+            }
+            else
+            {
+                $groupTag = $groupTag
+            }
+        }
+        else
+        {
+            $autopilotId = $null
+        }   
+    }
+    else
+    {
+        $intuneId = $null
+        $entraDeviceId = $null
+        $autopilotId = $null
+    }
+    if([string]::IsNullOrEmpty($groupTag))
+    {
+        $groupTag = $null
+    }
+    else
+    {
+        $groupTag = $groupTag
+    }
+    $pc = @{
+        hostname = $hostname
+        serialNumber = $serialNumber
+        azureAdJoined = $azureAdJoined
+        domainJoined = $domainJoined
+        intuneId = $intuneId
+        entraDeviceId = $entraDeviceId
+        autopilotId = $autopilotId
+        groupTag = $groupTag
+        mdm = $mdm
+    }
+    log "Writing device object to registry..."
+    foreach($x in $pc.Keys)
+    {
+        $name = "OLD_$($x)"
+        $value = $($pc[$x])
+        if(![string]::IsNullOrEmpty($value))
+        {
+            log "Writing $($name) with value $($value)."
+            try
+            {
+                reg.exe add $regPath /v $name /t REG_SZ /d $value /f | Out-Host
+                log "Successfully wrote $($name) with value $($value)."
+            }
+            catch
+            {
+                $message = $_.Exception.Message
+                log "Failed to write $($name) with value $($value).  Error: $($message)."
+            }
+        }
+        else
+        {
+            log "Value for $($name) is null.  Not writing to registry."
+        }
+    }
+    return $pc
 }
 
 # Create OLD device object
@@ -101,7 +206,7 @@ catch
 log "Creating current (OLD) user object record..."
 try
 {
-    $user = userObject -domainJoined $pc.domainJoined -azureAdJoined $pc.azureAdJoined -headers $sourceHeaders
+    $currentUser = userObject -domainJoined $pc.domainJoined -azureAdJoined $pc.azureAdJoined -headers $sourceHeaders
     log "Current (OLD) user object record created successfully."
 }
 catch
@@ -110,6 +215,94 @@ catch
     log "Failed to create current (OLD) user object record. Error: $message"
     log "Exiting script."
     exitScript -exitCode 4 -functionName "userObject"
+}
+
+# Attempt to get new user info based on current SAMName
+$sam = $currentUser.SAMName
+$newUserObject = Invoke-WebRequest -Method GET -Uri "https://graph.microsoft.com/beta/users?`$filter=startsWith(userPrincipalName,'$sam')" -Headers $targetHeaders
+
+# if new user graph request is successful, set new user object
+if($newUserObject.StatusCode -eq 200)
+{
+    log "New user found in $($config.targetTenant.tenantName) tenant."
+    $newUser = @{
+        user = $newUserObject.value.userPrincipalName
+        entraUserId = $newUserObject.value.id
+        SAMName = $newUserObject.value.userPrincipalName.Split("@")[0]
+    }
+    foreach($x in $newUser)
+    {
+        $name = "NEW_$($x)"
+        $value = $($newUser[$x])
+        if(![string]::IsNullOrEmpty($value))
+        {
+            log "Writing $($name) with value $($value)."
+            try
+            {
+                reg.exe add $config.regPath /v $name /t REG_SZ /d $value /f | Out-Host
+                log "Successfully wrote $($name) with value $($value)."
+            }
+            catch
+            {
+                $message = $_.Exception.Message
+                log "Failed to write $($name) with value $($value).  Error: $($message)."
+            }
+        }
+    }
+}
+else
+{
+    log "New user not found."
+    # run getTargetUserName function which is a textbox to prompt the user to enter their new email address
+    $newUPN = getTargetUserName
+    $newUserObject = Invoke-WebRequest -Method GET -Uri "https://graph.microsoft.com/beta/users/$newUPN" -Headers $targetHeaders
+    if($newUserObject.StatusCode -eq 200)
+    {
+        log "New user found in $($config.targetTenant.tenantName) tenant."
+        $newUser = @{
+            user = $newUserObject.value.userPrincipalName
+            entraUserId = $newUserObject.value.id
+            SAMName = $newUserObject.value.userPrincipalName.Split("@")[0]
+        }
+        foreach($x in $newUser)
+        {
+            $name = "NEW_$($x)"
+            $value = $($newUser[$x])
+            if(![string]::IsNullOrEmpty($value))
+            {
+                log "Writing $($name) with value $($value)."
+                try
+                {
+                    reg.exe add $config.regPath /v $name /t REG_SZ /d $value /f | Out-Host
+                    log "Successfully wrote $($name) with value $($value)."
+                }
+                catch
+                {
+                    $message = $_.Exception.Message
+                    log "Failed to write $($name) with value $($value).  Error: $($message)."
+                }
+            }
+        }
+    }
+    else
+    {
+        $newUser = $null
+        log "New user not found."
+    }
+}
+
+
+# Convert new user object ID to SID
+if($newUser.id)
+{
+    $newSID = convertToSid -objectId $newUser.id
+    log "New user object ID converted to SID."
+    reg.exe add $config.regPath /v "NEW_SID" /t REG_SZ /d $newSID /f | Out-Host
+}
+else
+{
+    log "New user object ID not found."
+    exitScript -exitCode 4 -functionName "convertToSid"
 }
 
 # Remove MDM certificate if present
@@ -235,96 +428,21 @@ else
 }
 
 # Remove SCCM client if required
+log "Checking for SCCM client..."
 if($config.SCCM -eq $true)
 {
-    log "Checking for SCCM client..."
-    $CCMpath = "C:\Windows\ccmsetup\ccmsetup.exe"
-    if($CCMpath)
+    log "SCCM enabled.  Removing SCCM client..."
+    try
     {
-        log "SCCM client found.  Removing SCCM client..."
-        Start-Process -FilePath $CCMpath -ArgumentList "/uninstall" -Wait -NoNewWindow
-        $CCMProcess = Get-Process -Name "ccmsetup" -ErrorAction SilentlyContinue
-        if($CCMProcess)
-        {
-            log "SCCM client still running; stopping..."
-            Stop-Process -Name "ccmsetup" -Force -ErrorAction SilentlyContinue
-            log "SCCM client stopped successfully."
-        }
-        else
-        {
-            log "SCCM client removed successfully."
-        }
+        removeSCCM
+        log "SCCM client removed successfully."
     }
-
-    # Stop SCCM services
-    $services = @("CcmExec","smstsmgr","CmRcService","ccmsetup")
-    foreach($service in $services)
+    catch
     {
-        log "Stopping $($service) service..."
-        Stop-Service -Name $service -Force -ErrorAction SilentlyContinue
-        log "$($service) service stopped successfully."
-    }
-    else
-    {
-        log "$service not found."
-    }
-
-    # remove WMI Namespaces
-    Get-WmiObject -Query "SELECT * FROM __Namespace WHERE Name = 'ccm'" -Namespace "root" | Remove-WmiObject
-    Get-WmiObject -Query "SELECT * FROM __Namespace WHERE Name = 'sms'" -Namespace "root\cimv2" | Remove-WmiObject
-
-    # remove SCCM registry keys
-    $sccmRegPath = "HKLM:\SYSTEM\CurrentControlSet\Services\"
-    foreach($service in $services)
-    {
-        $serviceKey = $sccmRegPath + $service
-        if(Test-Path $serviceKey)
-        {
-            log "Removing $serviceKey registry key..."
-            Remove-Item -Path $serviceKey -Recurse -Force -ErrorAction SilentlyContinue
-            log "Removed $serviceKey registry key."
-        }
-        else
-        {
-            log "$serviceKey registry key not found."
-        }
-    }
-
-    # remove sccm registry keys
-    $sccmRegPath = "HKLM:\SOFTWARE\Microsoft\"
-    $sccmKeys = @("CCM","SMS","CCMSetup")
-    foreach($key in $sccmKeys)
-    {
-        $keyPath = $sccmRegPath + $key
-        if(Test-Path $keyPath)
-        {
-            log "Removing $keyPath registry key..."
-            Remove-Item -Path $keyPath -Recurse -Force -ErrorAction SilentlyContinue
-            log "Removed $keyPath registry key."
-        }
-        else
-        {
-            log "$keyPath registry key not found."
-        }
-    }
-
-    # Reset MDM authority
-    Remove-Item -Path "HKLM:\SOFTWARE\Microsoft\DeviceManageabilityCSP" -Recurse -Force -ErrorAction SilentlyContinue
-
-    # Remove SCCM files and folders
-    $sccmFolders = @("C:\Windows\ccm","C:\Windows\ccmsetup","C:\Windows\ccmcache","C:\Windows\ccmcache2","C:\Windows\SMSCFG.ini","C:\Windows\SMS*.mif")
-    foreach($folder in $sccmFolders)
-    {
-        if(Test-Path $folder)
-        {
-            log "Removing $folder..."
-            Remove-Item -Path $folder -Recurse -Force -ErrorAction SilentlyContinue
-            log "Removed $folder."
-        }
-        else
-        {
-            log "$folder not found."
-        }
+        $message = $_.Exception.Message
+        log "Failed to remove SCCM client. Error: $message"
+        log "Exiting script."
+        exitScript -exitCode 4 -functionName "removeSCCM"
     }
 }
 else
@@ -484,7 +602,6 @@ catch
 
 # Stop transcript and restart
 log "$pc.hostname will reboot in 30 seconds..."
-
+Stop-Transcript
 shutdown -r -t 30
 
-Stop-Transcript
