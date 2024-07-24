@@ -17,7 +17,7 @@ Jesse Weimer
 
 $ErrorActionPreference = "SilentlyContinue"
 
-# Import module
+# Import module from same directory
 Import-Module "$($PSScriptRoot)\DeviceMigration.psm1" -Force
 
 # Import config settings from JSON file
@@ -48,35 +48,57 @@ log "Copying package files to $($destination)..."
 Copy-Item -Path "$($PSScriptRoot)\*" -Destination $destination -Recurse -Force
 log "Package files copied successfully."
 
-# Authenticate to source tenant
-log "Authenticating to source tenant..."
-try
+# Authenticate to source tenant if exists
+log "Checking for source tenant in JSON settings..."
+if([string]::IsNullOrEmpty($config.sourceTenant.tenantName))
 {
-    $sourceHeaders = msGraphAuthenticate -tenantName $config.sourceTenant.tenantname -clientId $config.sourceTenant.clientId -clientSecret $config.sourceTenant.clientSecret
-    log "Authenticated to $($config.sourceTenant.tenantName) source tenant successfully."
+    log "Source tenant not found in JSON settings."
+    exitScript -exitCode 4 -functionName "sourceTenant"
 }
-catch
+else
 {
-    $message = $_.Exception.Message
-    log "Failed to authenticate to $($config.sourceTenant.tenantName) source tenant. Error: $message"
-    log "Exiting script."
-    exitScript -exitCode 4 -functionName "msGraphAuthenticate"
+    log "Source tenant found in JSON settings."
+    try
+    {
+        log "Authenticating to source tenant..."
+        $sourceHeaders = msGraphAuthenticate -tenantName $config.sourceTenant.tenantname -clientId $config.sourceTenant.clientId -clientSecret $config.sourceTenant.clientSecret
+        log "Authenticated to $($config.sourceTenant.tenantName) source tenant successfully."
+    }
+    catch
+    {
+        $message = $_.Exception.Message
+        log "Failed to authenticate to $($config.sourceTenant.tenantName) source tenant. Error: $message"
+        log "Exiting script."
+        exitScript -exitCode 4 -functionName "msGraphAuthenticate"
+    }
 }
 
-# Authenticate to target tenant
-log "Authenticating to target tenant..."
-try
+
+# Authenticate to target tenant if exists
+log "Checking for target tenant in JSON settings..."
+if([string]::IsNullOrEmpty($config.targetTenant.tenantName))
 {
-    $targetHeaders = msGraphAuthenticate -tenantName $config.targetTenant.tenantname -clientId $config.targetTenant.clientId -clientSecret $config.targetTenant.clientSecret
-    log "Authenticated to $($config.targetTenant.tenantName) target tenant successfully."
+    log "Target tenant not found in JSON settings."
+    exitScript -exitCode 4 -functionName "targetTenant"
 }
-catch
+else
 {
-    $message = $_.Exception.Message
-    log "Failed to authenticate to $($config.targetTenant.tenantName) target tenant. Error: $message"
-    log "Exiting script."
-    exitScript -exitCode 4 -functionName "msGraphAuthenticate"
+    log "Target tenant found in JSON settings."
+    try
+    {
+        log "Authenticating to target tenant..."
+        $targetHeaders = msGraphAuthenticate -tenantName $config.targetTenant.tenantname -clientId $config.targetTenant.clientId -clientSecret $config.targetTenant.clientSecret
+        log "Authenticated to $($config.targetTenant.tenantName) target tenant successfully."
+    }
+    catch
+    {
+        $message = $_.Exception.Message
+        log "Failed to authenticate to $($config.targetTenant.tenantName) target tenant. Error: $message"
+        log "Exiting script."
+        exitScript -exitCode 4 -functionName "msGraphAuthenticate"
+    }
 }
+
 
 # Check Microsoft account connection registry policy
 log "Checking Microsoft account connection registry policy..."
@@ -94,11 +116,13 @@ else
     log "Microsoft account connection registry policy is set."
 }
 
+# FUNCTION: deviceObject
+# DESCRIPTION: Creates a device object and writes values to registry.
+# PARAMETERS: $hostname - The hostname of the device, $serialNumber - The serial number of the device, $azureAdJoined - Whether the device is Azure AD joined, $domainJoined - Whether the device is domain joined, $certPath - The path to the certificate store, $intuneIssuer - The Intune certificate issuer, $azureIssuer - The Azure certificate issuer, $groupTag - The group tag, $mdm - Whether the device is MDM enrolled.
 function deviceObject()
 {
     [CmdletBinding()]
     Param(
-        [Parameter(Mandatory=$true)]
         [object]$headers,
         [string]$hostname = $env:COMPUTERNAME,
         [string]$serialNumber = (Get-CimInstance -ClassName Win32_BIOS).SerialNumber,
@@ -111,29 +135,45 @@ function deviceObject()
         [string]$regPath = $config.regPath,
         [bool]$mdm = $false
     )
+    # Get Intune device certificate
     $cert = Get-ChildItem -Path $certPath | Where-Object {$_.Issuer -match $intuneIssuer}
+    # Get Intune and Entra device IDs if certificate exists
     if($cert)
     {
         $mdm = $true
         $intuneId = ((Get-ChildItem $cert | Select-Object Subject).Subject).TrimStart("CN=")
         $entraDeviceId = ((Get-ChildItem $certPath | Where-Object {$_.Issuer -match $azureIssuer} | Select-Object Subject).Subject).TrimStart("CN=")
-        $autopilotObject = (Invoke-RestMethod -Method Get -Uri "https://graph.microsoft.com/beta/deviceManagement/windowsAutopilotDeviceIdentities?`$filter=contains(serialNumber,'$($serialNumber)')" -Headers $headers)
-        if(($autopilotObject.'@odata.count') -eq 1)
+        # Get Autopilot object if headers provided
+        if($headers)
         {
-            $autopilotId = $autopilotObject.value.id
-            if([string]::IsNullOrEmpty($groupTag))
+            log "Headers provided.  Checking for Autopilot object..."
+            $autopilotObject = (Invoke-RestMethod -Method Get -Uri "https://graph.microsoft.com/beta/deviceManagement/windowsAutopilotDeviceIdentities?`$filter=contains(serialNumber,'$($serialNumber)')" -Headers $headers)
+            if(($autopilotObject.'@odata.count') -eq 1)
             {
-                $groupTag = $autopilotObject.value.groupTag
-            }
-            else
-            {
-                $groupTag = $groupTag
+                $autopilotId = $autopilotObject.value.id
+                if([string]::IsNullOrEmpty($groupTag))
+                {
+                    $groupTag = $autopilotObject.value.groupTag
+                }
+                else
+                {
+                    $groupTag = $groupTag
+                }
             }
         }
         else
         {
-            $autopilotId = $null
-        }   
+            log "Headers not provided.  Skipping Autopilot object check."            
+            $autopilotObject = $null
+        }
+    }
+    if($domainjoined -eq "YES")
+    {
+        $localDomain = Get-ItemPropertyValue -Path "HKLM:\SYSTEM\CurrentControlSet\Services\Tcpip\Parameters" -Name "Domain"
+    }
+    else
+    {
+        $localDomain = $null
     }
     else
     {
@@ -159,12 +199,15 @@ function deviceObject()
         autopilotId = $autopilotId
         groupTag = $groupTag
         mdm = $mdm
+        localDomain = $localDomain
     }
+    # Write device object to registry
     log "Writing device object to registry..."
     foreach($x in $pc.Keys)
     {
         $name = "OLD_$($x)"
         $value = $($pc[$x])
+        # Check if value is null or empty
         if(![string]::IsNullOrEmpty($value))
         {
             log "Writing $($name) with value $($value)."
@@ -202,11 +245,79 @@ catch
     exitScript -exitCode 4 -functionName "deviceObject"
 }
 
+# FUNCTION: userObject
+# DESCRIPTION: Creates a user object and writes values to registry.
+# PARAMETERS: $domainJoined - Whether the user is domain joined, $azureAdJoined - Whether the user is Azure AD joined, $headers - The headers for the REST API call.
+function userObject()
+{
+    [CmdletBinding()]
+    Param(
+        [string]$domainJoined = $pc.domainJoined,
+        [string]$azureAdJoined = $pc.azureAdJoined,
+        [object]$headers,
+        [string]$regPath = $config.regPath,
+        [string]$user = (Get-CimInstance -ClassName Win32_ComputerSystem | Select-Object UserName).UserName,
+        [string]$SID = (New-Object System.Security.Principal.NTAccount($user)).Translate([System.Security.Principal.SecurityIdentifier]).Value,
+        [string]$profilePath = (Get-ItemPropertyValue -Path "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList\$($SID)" -Name "ProfileImagePath"),
+        [string]$SAMName = ($user).Split("\")[1]
+    )
+    # If PC is NOT domain joined, get UPN from cache
+    if($domainJoined -eq "NO")
+    {
+        $upn = (Get-ItemPropertyValue -Path "HKLM:\SOFTWARE\Microsoft\IdentityStore\Cache\$($SID)\IdentityCache\$($SID)" -Name "UserName")
+        # If PC is Azure AD joined, get user ID from Graph
+        if($azureAdJoined -eq "YES")
+        {
+            $entraUserId = (Invoke-RestMethod -Method Get -Uri "https://graph.microsoft.com/beta/users/$($upn)" -Headers $headers).id
+        }
+        else
+        {
+            $entraUserId = $null
+        }
+    }
+    else
+    {
+        $upn = $null
+        $entraUserId = $null
+    }
+    $user = @{
+        user = $user
+        upn = $upn
+        entraUserId = $entraUserId
+        profilePath = $profilePath
+        SAMName = $SAMName
+        SID = $SID
+    }
+    # Write user object to registry
+    foreach($x in $user.Keys)
+    {
+        $name = "OLD_$($x)"
+        $value = $($user[$x])
+        # Check if value is null or empty
+        if(![string]::IsNullOrEmpty($value))
+        {
+            log "Writing $($name) with value $($value)."
+            try
+            {
+                reg.exe add $regPath /v $name /t REG_SZ /d $value /f | Out-Host
+                log "Successfully wrote $($name) with value $($value)."
+            }
+            catch
+            {
+                $message = $_.Exception.Message
+                log "Failed to write $($name) with value $($value).  Error: $($message)."
+            }
+        }
+    }
+    return $user
+}
+
+
 # Create OLD user object
 log "Creating current (OLD) user object record..."
 try
 {
-    $currentUser = userObject -domainJoined $pc.domainJoined -azureAdJoined $pc.azureAdJoined -headers $sourceHeaders
+    $currentUser = userObject -headers $sourceHeaders
     log "Current (OLD) user object record created successfully."
 }
 catch
@@ -219,43 +330,11 @@ catch
 
 # Attempt to get new user info based on current SAMName
 $sam = $currentUser.SAMName
-$newUserObject = Invoke-WebRequest -Method GET -Uri "https://graph.microsoft.com/beta/users?`$filter=startsWith(userPrincipalName,'$sam')" -Headers $targetHeaders
-
-# if new user graph request is successful, set new user object
-if($newUserObject.StatusCode -eq 200)
+# If target tenant headers exist, get new user object
+if($targetHeaders)
 {
-    log "New user found in $($config.targetTenant.tenantName) tenant."
-    $newUser = @{
-        user = $newUserObject.value.userPrincipalName
-        entraUserId = $newUserObject.value.id
-        SAMName = $newUserObject.value.userPrincipalName.Split("@")[0]
-    }
-    foreach($x in $newUser)
-    {
-        $name = "NEW_$($x)"
-        $value = $($newUser[$x])
-        if(![string]::IsNullOrEmpty($value))
-        {
-            log "Writing $($name) with value $($value)."
-            try
-            {
-                reg.exe add $config.regPath /v $name /t REG_SZ /d $value /f | Out-Host
-                log "Successfully wrote $($name) with value $($value)."
-            }
-            catch
-            {
-                $message = $_.Exception.Message
-                log "Failed to write $($name) with value $($value).  Error: $($message)."
-            }
-        }
-    }
-}
-else
-{
-    log "New user not found."
-    # run getTargetUserName function which is a textbox to prompt the user to enter their new email address
-    $newUPN = getTargetUserName
-    $newUserObject = Invoke-WebRequest -Method GET -Uri "https://graph.microsoft.com/beta/users/$newUPN" -Headers $targetHeaders
+    $newUserObject = Invoke-WebRequest -Method GET -Uri "https://graph.microsoft.com/beta/users?`$filter=startsWith(userPrincipalName,'$sam')" -Headers $targetHeaders
+    # if new user graph request is successful, set new user object
     if($newUserObject.StatusCode -eq 200)
     {
         log "New user found in $($config.targetTenant.tenantName) tenant."
@@ -263,7 +342,9 @@ else
             user = $newUserObject.value.userPrincipalName
             entraUserId = $newUserObject.value.id
             SAMName = $newUserObject.value.userPrincipalName.Split("@")[0]
+            SID = $newUserObject.value.securityIdentifier
         }
+        # Write new user object to registry
         foreach($x in $newUser)
         {
             $name = "NEW_$($x)"
@@ -286,23 +367,8 @@ else
     }
     else
     {
-        $newUser = $null
-        log "New user not found."
+        log "New user not found in $($config.targetTenant.tenantName) tenant."
     }
-}
-
-
-# Convert new user object ID to SID
-if($newUser.id)
-{
-    $newSID = convertToSid -objectId $newUser.id
-    log "New user object ID converted to SID."
-    reg.exe add $config.regPath /v "NEW_SID" /t REG_SZ /d $newSID /f | Out-Host
-}
-else
-{
-    log "New user object ID not found."
-    exitScript -exitCode 4 -functionName "convertToSid"
 }
 
 # Remove MDM certificate if present
