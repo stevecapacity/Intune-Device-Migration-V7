@@ -92,12 +92,12 @@ else
 
 # Change ownership of user profile
 log "Changing ownership of user profile..."
-$profile = Get-CimInstance -ClassName Win32_UserProfile | Where-Object {$_.SID -eq $OLD_SID}
+$currentProfile = Get-CimInstance -ClassName Win32_UserProfile | Where-Object {$_.SID -eq $OLD_SID}
 $changes = @{
     NewOwnerSID = $NEW_SID
     Flags = 0
 }
-$profile | Invoke-CimMethod -MethodName ChangeOwner -Arguments $changes
+$currentProfile | Invoke-CimMethod -MethodName ChangeOwner -Arguments $changes
 Start-Sleep -Seconds 1
 
 # Cleanup logon cache

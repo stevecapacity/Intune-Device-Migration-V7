@@ -33,7 +33,8 @@ function exitScript()
         [int]$errorCode,
         [Parameter(Mandatory=$true)]
         [string]$functionName,
-        [string]$localpath = $config.localPath
+        [string]$localpath = $config.localPath,
+        [array]$tasks = @("reboot", "postMigrate")
     )
     if($exitCode -eq 1)
     {
@@ -44,6 +45,11 @@ function exitScript()
         # enable password logon provider
         reg.exe add "HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Authentication\Credential Providers\{60b78e88-ead8-445c-9cfd-0b87f74ea6cd}" /v "Disabled" /t REG_DWORD /d 0 /f | Out-Host
         log "Enabled logon provider."
+        foreach($task in $tasks)
+        {
+            Disable-ScheduledTask -TaskName $task -Verbose
+            log "Disabled $($task) task."
+        }
         log "rebooting device..."
         shutdown -r -t 30
         Stop-Transcript
@@ -54,6 +60,11 @@ function exitScript()
         log "Function $($functionName) failed with non-critical error.  Exiting script with exit code $($exitCode)."
         Remove-Item -Path $localpath -Recurse -Force -Verbose
         log "Removed $($localpath)."
+        foreach($task in $tasks)
+        {
+            Disable-ScheduledTask -TaskName $task -Verbose
+            log "Disabled $($task) task."
+        }
         Stop-Transcript
         Exit 0
     }
@@ -96,7 +107,6 @@ function initializeScript()
         [bool]$installTag,
         [string]$localPath = $config.localPath
     )
-    log "Initializing script..."
     if(!(Test-Path $localPath))
     {
         New-Item -ItemType Directory -Path $localPath -Force -Verbose
@@ -108,6 +118,7 @@ function initializeScript()
     }
     if($installTag -eq $true)
     {
+        log "Setting install tag for Intune app detection..."
         $installTagPath = "$($localPath)\installed.tag"
         New-Item -ItemType File -Path $installTagPath -Force -Verbose
         log "Created $($installTagPath)."
@@ -192,245 +203,6 @@ function toggleDisplayLastUser()
     }
 }
 
-# FUNCTION: deviceObject
-# DESCRIPTION: Creates a device object.
-# PARAMETERS: $hostname - The hostname of the device, $serialNumber - The serial number of the device, $azureAdJoined - Whether the device is Azure AD joined, $domainJoined - Whether the device is domain joined, $certPath - The path to the certificate store, $intuneIssuer - The Intune certificate issuer, $azureIssuer - The Azure certificate issuer, $groupTag - The group tag, $mdm - Whether the device is MDM enrolled.
-
-function deviceObject()
-{
-    [CmdletBinding()]
-    Param(
-        [Parameter(Mandatory=$true)]
-        [object]$headers,
-        [string]$hostname = $env:COMPUTERNAME,
-        [string]$serialNumber = (Get-CimInstance -ClassName Win32_BIOS).SerialNumber,
-        [string]$azureAdJoined = (dsregcmd.exe /status | Select-String "AzureAdJoined").ToString().Split(":")[1].Trim(),
-        [string]$domainjoined = (dsregcmd.exe /status | Select-String "DomainJoined").ToString().Split(":")[1].Trim(),
-        [string]$certPath = "Cert:\LocalMachine\My",
-        [string]$intuneIssuer = "Microsoft Intune MDM Device CA",
-        [string]$azureIssuer = "MS-Organization-Access",
-        [string]$groupTag = $config.groupTag,
-        [string]$regPath = $config.regPath,
-        [bool]$mdm = $false
-    )
-    $cert = Get-ChildItem -Path $certPath | Where-Object {$_.Issuer -match $intuneIssuer}
-    if($cert)
-    {
-        $mdm = $true
-        $intuneId = ((Get-ChildItem $cert | Select-Object Subject).Subject).TrimStart("CN=")
-        $entraDeviceId = ((Get-ChildItem $certPath | Where-Object {$_.Issuer -match $azureIssuer} | Select-Object Subject).Subject).TrimStart("CN=")
-        $autopilotObject = (Invoke-RestMethod -Method Get -Uri "https://graph.microsoft.com/beta/deviceManagement/windowsAutopilotDeviceIdentities?`$filter=contains(serialNumber,'$($serialNumber)')" -Headers $headers)
-        if(($autopilotObject.'@odata.count') -eq 1)
-        {
-            $autopilotId = $autopilotObject.value.id
-            if([string]::IsNullOrEmpty($groupTag))
-            {
-                $groupTag = $autopilotObject.value.groupTag
-            }
-            else
-            {
-                $groupTag = $groupTag
-            }
-        }
-        else
-        {
-            $autopilotId = $null
-        }   
-    }
-    else
-    {
-        $intuneId = $null
-        $entraDeviceId = $null
-        $autopilotId = $null
-    }
-    if([string]::IsNullOrEmpty($groupTag))
-    {
-        $groupTag = $null
-    }
-    else
-    {
-        $groupTag = $groupTag
-    }
-    $pc = @{
-        hostname = $hostname
-        serialNumber = $serialNumber
-        azureAdJoined = $azureAdJoined
-        domainJoined = $domainJoined
-        intuneId = $intuneId
-        entraDeviceId = $entraDeviceId
-        autopilotId = $autopilotId
-        groupTag = $groupTag
-        mdm = $mdm
-    }
-    log "Writing device object to registry..."
-    foreach($x in $pc.Keys)
-    {
-        $name = "OLD_$($x)"
-        $value = $($pc[$x])
-        if(![string]::IsNullOrEmpty($value))
-        {
-            log "Writing $($name) with value $($value)."
-            try
-            {
-                reg.exe add $regPath /v $name /t REG_SZ /d $value /f | Out-Host
-                log "Successfully wrote $($name) with value $($value)."
-            }
-            catch
-            {
-                $message = $_.Exception.Message
-                log "Failed to write $($name) with value $($value).  Error: $($message)."
-            }
-        }
-        else
-        {
-            log "Value for $($name) is null.  Not writing to registry."
-        }
-    }
-    return $pc
-}
-
-# FUNCTION: userObject
-# DESCRIPTION: Creates a user object.
-# PARAMETERS: $domainJoined - Whether the user is domain joined, $azureAdJoined - Whether the user is Azure AD joined, $headers - The headers for the REST API call.
-function userObject()
-{
-    [CmdletBinding()]
-    Param(
-        [Parameter(Mandatory=$true)]
-        [string]$domainJoined,
-        [Parameter(Mandatory=$true)]
-        [string]$azureAdJoined,
-        [Parameter(Mandatory=$true)]
-        [object]$headers,
-        [string]$regPath = $config.regPath,
-        [string]$user = (Get-CimInstance -ClassName Win32_ComputerSystem | Select-Object UserName).UserName,
-        [string]$SID = (New-Object System.Security.Principal.NTAccount($user)).Translate([System.Security.Principal.SecurityIdentifier]).Value,
-        [string]$profilePath = (Get-ItemPropertyValue -Path "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList\$($SID)" -Name "ProfileImagePath"),
-        [string]$SAMName = ($user).Split("\")[1]
-    )
-    if($domainJoined -eq "NO")
-    {
-        $upn = (Get-ItemPropertyValue -Path "HKLM:\SOFTWARE\Microsoft\IdentityStore\Cache\$($SID)\IdentityCache\$($SID)" -Name "UserName")
-        if($azureAdJoined -eq "YES")
-        {
-            $entraUserId = (Invoke-RestMethod -Method Get -Uri "https://graph.microsoft.com/beta/users/$($upn)" -Headers $headers).id
-        }
-        else
-        {
-            $entraUserId = $null
-        }
-    }
-    else
-    {
-        $upn = $null
-        $entraUserId = $null
-    }
-    $user = @{
-        user = $user
-        upn = $upn
-        entraUserId = $entraUserId
-        profilePath = $profilePath
-        SAMName = $SAMName
-        SID = $SID
-    }
-    foreach($x in $user.Keys)
-    {
-        $name = "OLD_$($x)"
-        $value = $($user[$x])
-        if(![string]::IsNullOrEmpty($value))
-        {
-            log "Writing $($name) with value $($value)."
-            try
-            {
-                reg.exe add $regPath /v $name /t REG_SZ /d $value /f | Out-Host
-                log "Successfully wrote $($name) with value $($value)."
-            }
-            catch
-            {
-                $message = $_.Exception.Message
-                log "Failed to write $($name) with value $($value).  Error: $($message)."
-            }
-        }
-    }
-    return $user
-}
-
-# FUNCTION: setTasks
-# DESCRIPTION: Sets the scheduled tasks.
-# PARAMETERS: $taskName - The name of the task, $taskPath - The path to the task
-
-function setTasks()
-{
-    [CmdletBinding()]
-    Param(
-        [Parameter(Mandatory=$true)]
-        [array]$tasks,
-        [string]$localPath = $config.localPath
-    )
-    foreach($task in $tasks)
-    {
-        $taskPath = "$($localPath)\$($task).xml"
-        if($taskPath)
-        {
-            log "Setting $($task) task..."
-            schtasks.exe /Create /XML $taskPath /TN $task /F | Out-Host
-            log "Successfully set $($task) task."
-        }
-        else
-        {
-            log "Failed to set $($task) task."
-        }
-    }
-}
-
-# FUNCTION: unjoinDomain
-# DESCRIPTION: Unjoins the device from the domain.
-# PARAMETERS: $unjoinAccount - The account to unjoin the device with, $hostname - The hostname of the device.
-
-function unjoinDomain()
-{
-    [CmdletBinding()]
-    Param(
-        [Parameter(Mandatory=$true)]
-        [string]$unjoinAccount,
-        [Parameter(Mandatory=$true)]
-        [string]$hostname
-    )
-    $adapter = Get-NetAdapter | Where-Object {$_.Status -eq 'Up'} | Select-Object -ExpandProperty InterfaceAlias
-    $dns = Get-DnsClientServerAddress -InterfaceAlias $adapter | Select-Object -ExpandProperty ServerAddresses
-    if($dns -ne '8.8.8.8')
-    {
-        log "Breaking line of sight to domain controller..."
-        Set-DnsClientServerAddress -InterfaceAlias $adapter -ServerAddresses ("8.8.8.8","8.8.4.4")
-        log "Successfully broke line of sight to domain controller."
-    }
-    else
-    {
-        log "Line of sight to domain controller is already broken."
-    }
-    $password = generatePassword
-    log "Generated password for $unjoinAccount."
-    log "Checking $unjoinAccount status..."
-    [bool]$acctStatus = (Get-LocalUser -Name $unjoinAccount).Enabled
-    if($acctStatus -eq $false)
-    {
-        log "$unjoinAccount is disabled; setting password and enabling..."
-        Set-LocalUser -Name $unjoinAccount -Password $password -PasswordNeverExpires $true
-        Get-LocalUser -Name $unjoinAccount | Enable-LocalUser
-        log "Successfully set password and enabled $unjoinAccount."
-    }
-    else
-    {
-        log "$unjoinAccount is enabled; setting password..."
-        Set-LocalUser -Name $unjoinAccount -Password $password -PasswordNeverExpires $true
-        log "Successfully set password for $unjoinAccount."
-    }
-    $cred = New-Object -TypeName System.Management.Automation.PSCredential -ArgumentList ("$hostname\$unjoinAccount", $password)
-    log "Unjoining $hostname from domain..."
-    Remove-Computer -UnjoinDomainCredential $cred -PassThru -Force -Verbose
-    log "Successfully unjoined $hostname from domain."
-}
-
 # FUNCTION: toggleLogonProvider
 # DESCRIPTION: Toggles the logon provider.
 # PARAMETERS: $enable - Whether to enable or disable the logon provider.
@@ -476,33 +248,7 @@ function toggleLogonProvider()
     }
 }
 
-# FUNCTION: setAutoLogonAdmin
-# DESCRIPTION: Sets the auto logon for the administrator account.
-# PARAMETERS: $username - The username to set auto logon for, $password - The password to set auto logon for.
 
-function setAutoLogonAdmin()
-{
-    Param(
-        [string]$regPath = "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon",
-        [string]$regName = "AutoAdminLogon",
-        [string]$migrateAdmin = "MigrationInProgress"
-    )
-    log "Creating local admin account..."
-    $adminPW = generatePassword
-    $adminGroup = Get-CimInstance -Query "Select * From Win32_Group Where LocalAccount = True And SID = 'S-1-5-32-544'"
-    $adminGroupName = $adminGroup.Name
-    New-LocalUser -Name $migrateAdmin -Password $adminPW
-    Add-LocalGroupMember -Group $adminGroupName -Member $migrateAdmin
-    log "Successfully created local admin account."
-    reg.exe add $regPath /v "AutoAdminLogon" /t REG_SZ /d 0 /f | Out-Host
-    reg.exe add $regPath /v "DefaultUserName" /t REG_SZ /d $migrateAdmin /f | Out-Host
-    reg.exe add $regPath /v "DefaultPassword" /t REG_SZ /d "@Password*123" | Out-Host
-    log "Successfully set auto logon to $migrateAdmin."
-}
-
-# FUNCTION: toggleAutoLogon
-# DESCRIPTION: Toggles the auto logon setting.
-# PARAMETERS: $enable - Whether to enable or disable the auto logon setting.
 
 function toggleAutoLogon()
 {
@@ -562,61 +308,4 @@ function setLockScreenCaption()
     reg.exe add $regPath /v "legalnoticecaption" /t REG_SZ /d $caption /f | Out-Host
     reg.exe add $regPath /v "legalnoticetext" /t REG_SZ /d $text /f | Out-Host
     log "Successfully set lock screen caption."
-}
-
-# FUNCTION: getTargetUsername
-# DESCRIPTION: Prompts the user for a username.
-
-function getTargetUsername()
-{
-    # Text box
-    Add-Type -AssemblyName System.Windows.Forms
-    Add-Type -AssemblyName System.Drawing
-
-    $form = New-Object System.Windows.Forms.Form
-    $form.Text = 'Enter user name'
-    $form.Size = New-Object System.Drawing.Size(300,200)
-    $form.StartPosition = 'CenterScreen'
-
-    $okButton = New-Object System.Windows.Forms.Button
-    $okButton.Location = New-Object System.Drawing.Point(75,120)
-    $okButton.Size = New-Object System.Drawing.Size(75,23)
-    $okButton.Text = 'OK'
-    $okButton.DialogResult = [System.Windows.Forms.DialogResult]::OK
-    $form.AcceptButton = $okButton
-    $form.Controls.Add($okButton)
-
-    $cancelButton = New-Object System.Windows.Forms.Button
-    $cancelButton.Location = New-Object System.Drawing.Point(150,120)
-    $cancelButton.Size = New-Object System.Drawing.Size(75,23)
-    $cancelButton.Text = 'Cancel'
-    $cancelButton.DialogResult = [System.Windows.Forms.DialogResult]::Cancel
-    $form.CancelButton = $cancelButton
-    $form.Controls.Add($cancelButton)
-
-    $label = New-Object System.Windows.Forms.Label
-    $label.Location = New-Object System.Drawing.Point(10,20)
-    $label.Size = New-Object System.Drawing.Size(280,20)
-    $label.Text = 'Please enter your target email address in the space below and click OK:'
-    $form.Controls.Add($label)
-
-    $textBox = New-Object System.Windows.Forms.TextBox
-    $textBox.Location = New-Object System.Drawing.Point(10,40)
-    $textBox.Size = New-Object System.Drawing.Size(260,20)
-    $form.Controls.Add($textBox)
-
-    $form.Topmost = $true
-
-    $form.Add_Shown({$textBox.Select()})
-    $result = $form.ShowDialog()
-
-    if ($result -eq [System.Windows.Forms.DialogResult]::OK)
-    {
-        $user = $textBox.Text
-        return $user
-    }
-    else
-    {
-        return $null
-    }
 }

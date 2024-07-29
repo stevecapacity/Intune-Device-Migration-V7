@@ -1,38 +1,48 @@
-# try to get new user
-
-$sam = $user.SAMName
-$newUserId = (Invoke-WebRequest -Method GET -Uri "https://graph.microsoft.com/beta/users?`$filter=startsWith(userPrincipalName,'$sam')").value.id
-
-if([string]::IsNullOrEmpty($newUser))
-{
-    Write-Host "User not found"
-    $newUPN = getTargetUserName
-    $newUserId = (Invoke-WebRequest -Method GET -Uri "https://graph.microsoft.com/beta/users?`$filter=startsWith(userPrincipalName,'$newUPN')").value.id
-    if([string]::IsNullOrEmpty($newUser))
-    {
-        $newUserId = $null
+ # AUTHENTICATE TO MS GRAPH
+ $clientId = "<CLIENT_ID>"
+ $clientSecret = "<CLIENT_SECRET>"
+ $tenantId = "<TEANANT_ID>"
+ 
+ $tokenEndpoint = "https://login.microsoftonline.com/$tenantId/oath2/v2.0/token"
+ $tokenRequestBody = @{
+     client_id = $clientId
+     client_secret = $clientSecret
+     scope = "https://graph.microsoft.com/.default"
+     grant_type = "client_credentials"
+ }
+ 
+ $tokenResponse = Invoke-RestMethod -Method Post -Uri $tokenEndpoint -Body $tokenRequestBody
+ $accessToken = $tokenResponse.access_token
+ 
+ $headers = @{
+     "Authorization" = "Bearer $accessToken"
+ }
+ 
+ 
+ 
+ # GET HARDWARE INFO
+ $serialNumber = (Get-WmiObject -Class Win32_BIOS).SerialNumber
+ $hardwareId = ((Get-WmiObject -Namespace root/cimv2/mdm/dmmap -Class MDM_DevDetail_Ext01 -Filter "InstanceID='Ext' AND ParentID='./DevDetail'").DeviceHardwareData)
+ $groupTag = "M365"
+ 
+ # CONSTRUCT JSON
+ $json = @"
+ {
+    "@odata.type": "#microsoft.graph.importedWindowsAutopilotDeviceIdentity",
+     "groupTag":"$groupTag",
+     "serialNumber":"$serialNumber",
+     "productKey":"",
+     "hardwareIdentifier":"$hardwareId",
+     "assignedUserPrincipalName":"",
+     "state":{
+         "@odata.type":"microsoft.graph.importedWindowsAutopilotDeviceIdentityState",
+         "deviceImportStatus":"pending",
+         "deviceRegistrationId":"",
+         "deviceErrorCode":0,
+         "deviceErrorName":""
+     }
     }
-    else
-    {
-        Write-Host "User found"
-        $newUserId = $newUserId
-    }
-}
-else
-{
-    Write-Host "User found"
-    $newUserId = $newUserId
-}
-
-if([string]::IsNullOrEmpty($newUserId))
-{
-    Write-Host "User not found"
-    exit 1
-}
-else
-{
-    Write-Host "User found.  Converting to SID"
-    $newSID = ConvertToSid -ObjectId $newUserId
-}
-
-reg.exe add $regPath /v "NewSID" /t REG_SZ /d $newSID /f
+"@
+ 
+ # POST DEVICE
+ Invoke-RestMethod -Method Post -Body $json -ContentType "application/json" -Uri "https://graph.microsoft.com/beta/deviceManagement/importedWindowsAutopilotDeviceIdentities" -Headers $headers

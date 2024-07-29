@@ -167,14 +167,6 @@ function deviceObject()
             $autopilotObject = $null
         }
     }
-    if($domainjoined -eq "YES")
-    {
-        $localDomain = Get-ItemPropertyValue -Path "HKLM:\SYSTEM\CurrentControlSet\Services\Tcpip\Parameters" -Name "Domain"
-    }
-    else
-    {
-        $localDomain = $null
-    }
     else
     {
         $intuneId = $null
@@ -188,6 +180,14 @@ function deviceObject()
     else
     {
         $groupTag = $groupTag
+    }
+    if($domainjoined -eq "YES")
+    {
+        $localDomain = Get-ItemPropertyValue -Path "HKLM:\SYSTEM\CurrentControlSet\Services\Tcpip\Parameters" -Name "Domain"
+    }
+    else
+    {
+        $localDomain = $null
     }
     $pc = @{
         hostname = $hostname
@@ -330,6 +330,7 @@ catch
 
 # Attempt to get new user info based on current SAMName
 $sam = $currentUser.SAMName
+$newUser = $null
 # If target tenant headers exist, get new user object
 if($targetHeaders)
 {
@@ -344,32 +345,107 @@ if($targetHeaders)
             SAMName = $newUserObject.value.userPrincipalName.Split("@")[0]
             SID = $newUserObject.value.securityIdentifier
         }
-        # Write new user object to registry
-        foreach($x in $newUser)
-        {
-            $name = "NEW_$($x)"
-            $value = $($newUser[$x])
-            if(![string]::IsNullOrEmpty($value))
-            {
-                log "Writing $($name) with value $($value)."
-                try
-                {
-                    reg.exe add $config.regPath /v $name /t REG_SZ /d $value /f | Out-Host
-                    log "Successfully wrote $($name) with value $($value)."
-                }
-                catch
-                {
-                    $message = $_.Exception.Message
-                    log "Failed to write $($name) with value $($value).  Error: $($message)."
-                }
-            }
-        }
     }
     else
     {
-        log "New user not found in $($config.targetTenant.tenantName) tenant."
+        # Make sure nuget package is installed
+        $installedNuget = Get-PackageProvider -Name NuGet -ListAvailable -ErrorAction SilentlyContinue
+        if(-not($installedNuget))
+        {
+            log "NuGet package provider not installed.  Installing..."
+            Install-PackageProvider -Name NuGet -Force
+            log "NuGet package provider installed successfully."
+        }
+        else
+        {
+            log "NuGet package provider already installed."
+        }
+        # Check for Az.Accounts module
+        $installedAzAccounts = Get-Module -Name Az.Accounts -ErrorAction SilentlyContinue
+        if(-not($installedAzAccounts))
+        {
+            log "Az.Accounts module not installed.  Installing..."
+            Install-Module -Name Az.Accounts -Force
+            Import-Module Az.Accounts
+            log "Az.Accounts module installed successfully."
+        }
+        else
+        {
+            log "Az.Accounts module already installed."
+            Import-Module Az.Accounts
+        }
+        try
+        {
+            Connect-AzAccount
+            $token = Get-AzAccessToken -ResourceUrl "https://graph.microsoft.com/"
+            #Get Token form OAuth
+            $token = -join("Bearer ", $token.Token)
+
+            #Reinstantiate headers
+            $headers = New-Object "System.Collections.Generic.Dictionary[[String],[String]]"
+            $headers.Add("Authorization", $token)
+            $headers.Add("Content-Type", "application/json")
+
+            $output = Invoke-RestMethod -Uri "https://graph.microsoft.com/v1.0/me" -Headers $headers -Method "GET"
+            $newUPN = $output.userPrincipalName
+            if([string]::IsNullOrEmpty($newUPN))
+            {
+                Log "New user not found in $($config.targetTenant.tenantName) tenant."
+            }
+            else
+            {
+                $newUserObject = Invoke-WebRequest -Method GET -Uri "https://graph.microsoft.com/beta/users/$newUPN" -Headers $targetHeaders
+                if($newUserObject.StatusCode -eq 200)
+                {
+                    log "New user found in $($config.targetTenant.tenantName) tenant."
+                    $newUser = @{
+                        user = $newUserObject.userPrincipalName
+                        entraUserId = $newUserObject.id
+                        SAMName = $newUserObject.userPrincipalName.Split("@")[0]
+                        SID = $newUserObject.securityIdentifier
+                    }
+                }
+                else
+                {
+                    log "New user not found in $($config.targetTenant.tenantName) tenant."
+                }
+            }
+        }
+        catch
+        {
+            $message = $_.Exception.Message
+            log "Failed to get new user object. Error: $message"
+            log "Exiting script."
+            exitScript -exitCode 4 -functionName "newUserObject"
+        }
+    }
+    # Write new user object to registry
+    foreach($x in $newUser)
+    {
+        $name = "NEW_$($x)"
+        $value = $($newUser[$x])
+        if(![string]::IsNullOrEmpty($value))
+        {
+            log "Writing $($name) with value $($value)."
+            try
+            {
+                reg.exe add $config.regPath /v $name /t REG_SZ /d $value /f | Out-Host
+                log "Successfully wrote $($name) with value $($value)."
+            }
+            catch
+            {
+                $message = $_.Exception.Message
+                log "Failed to write $($name) with value $($value).  Error: $($message)."
+            }
+        }
     }
 }
+else
+{
+    log "Target tenant headers not provided.  Skipping new user object creation."
+}
+
+
 
 # Remove MDM certificate if present
 if($pc.mdm -eq $true)
@@ -405,49 +481,63 @@ if($pc.mdm -eq $true)
             log "MDM enrollment not present."
         }
     }
+    $enrollId = $enrollPath.Split("\")[-1]
+    $additionalPaths = @(
+        "HKLM:\SOFTWARE\Microsoft\Enrollments\Status\$($enrollID)",
+        "HKLM:\SOFTWARE\Microsoft\EnterpriseResourceManager\Tracked\$($enrollID)",
+        "HKLM:\SOFTWARE\Microsoft\PolicyManager\AdmxInstalled\$($enrollID)",
+        "HKLM:\SOFTWARE\Microsoft\PolicyManager\Providers\$($enrollID)",
+        "HKLM:\SOFTWARE\Microsoft\Provinsioning\OMADM\Accounts\$($enrollID)",
+        "HKLM:\SOFTWARE\Microsoft\Provisioning\OMADM\Logger\$($enrollID)",
+        "HKLM:\SOFTWARE\Microsoft\Provisioning\OMADM\Sessions\$($enrollID)"
+    )
+    foreach($path in $additionalPaths)
+    {
+        if(Test-Path $path)
+        {
+            log "Removing $($path)..."
+            Remove-Item -Path $path -Recurse
+            log "$($path) removed successfully."
+        }
+        else
+        {
+            log "$($path) not present."
+        }
+    }
 }
 else
 {
     log "MDM enrollment not present."
 }
-$enrollId = $enrollPath.Split("\")[-1]
-$additionalPaths = @(
-    "HKLM:\SOFTWARE\Microsoft\Enrollments\Status\$($enrollID)",
-    "HKLM:\SOFTWARE\Microsoft\EnterpriseResourceManager\Tracked\$($enrollID)",
-    "HKLM:\SOFTWARE\Microsoft\PolicyManager\AdmxInstalled\$($enrollID)",
-    "HKLM:\SOFTWARE\Microsoft\PolicyManager\Providers\$($enrollID)",
-    "HKLM:\SOFTWARE\Microsoft\Provinsioning\OMADM\Accounts\$($enrollID)",
-    "HKLM:\SOFTWARE\Microsoft\Provisioning\OMADM\Logger\$($enrollID)",
-    "HKLM:\SOFTWARE\Microsoft\Provisioning\OMADM\Sessions\$($enrollID)"
-)
-foreach($path in $additionalPaths)
+
+
+# Set migration tasks
+$tasks = @("reboot","postMigrate")
+foreach($task in $tasks)
 {
-    if(Test-Path $path)
+    $taskPath = "$($config.localPath)\$($task).xml"
+    if([string]::IsNullOrEmpty($taskPath))
     {
-        log "Removing $($path)..."
-        Remove-Item -Path $path -Recurse
-        log "$($path) removed successfully."
+        log "$($task) task not found."
     }
     else
     {
-        log "$($path) not present."
+        log "Setting $($task) task..."
+        try
+        {
+            schtasks.exe /create /xml $taskPath /tn $task /f | Out-Host
+            log "$($task) task set successfully."
+        }
+        catch
+        {
+            $message = $_.Exception.Message
+            log "Failed to set $($task) task. Error: $message"
+            log "Exiting script."
+            exitScript -exitCode 4 -functionName "schtasks"
+        }
     }
 }
 
-# Set migration tasks
-log "Setting migration tasks..."
-try
-{
-    setTasks -tasks @("reboot","postMigrate")
-    log "Migration tasks set successfully."
-}
-catch
-{
-    $message = $_.Exception.Message
-    log "Failed to set migration tasks. Error: $message"
-    log "Exiting script."
-    exitScript -exitCode 4 -functionName "setTasks"
-}
 
 # Leave Azure AD / Entra Join
 if($pc.azureAdJoined -eq "YES")
@@ -471,13 +561,63 @@ else
     log "PC is not Azure AD Joined."
 }
 
+# FUNCTION: unjoinDomain
+# DESCRIPTION: Unjoins the device from the domain.
+# PARAMETERS: $unjoinAccount - The account to unjoin the device with, $hostname - The hostname of the device.
+
+function unjoinDomain()
+{
+    [CmdletBinding()]
+    Param(
+        [Parameter(Mandatory=$true)]
+        [string]$unjoinAccount,
+        [string]$hostname = $pc.hostname,
+        [string]$localDomain = $pc.localDomain
+    )
+    # Check for line of sight to domain controller
+    $pingCount = 4
+    $pingResult = Test-Connection -ComputerName $localDomain -Count $pingCount
+    if($pingResult.StatusCode -eq 0)
+    {
+        log "$($hostname) has line of sight to domain controller.  Attempting to break..."
+        $adapter = Get-NetAdapter | Where-Object {$_.Status -eq 'Up'} | Select-Object -ExpandProperty InterfaceAlias
+        Set-DnsClientServerAddress -InterfaceAlias $adapter -ServerAddresses ("8.8.8.8","8.8.4.4")
+        log "Successfully broke line of sight to domain controller."
+    }
+    else
+    {
+        log "$($hostname) has no line of sight to domain controller."
+    }
+    $password = generatePassword
+    log "Generated password for $unjoinAccount."
+    log "Checking $unjoinAccount status..."
+    [bool]$acctStatus = (Get-LocalUser -Name $unjoinAccount).Enabled
+    if($acctStatus -eq $false)
+    {
+        log "$unjoinAccount is disabled; setting password and enabling..."
+        Set-LocalUser -Name $unjoinAccount -Password $password -PasswordNeverExpires $true
+        Get-LocalUser -Name $unjoinAccount | Enable-LocalUser
+        log "Successfully set password and enabled $unjoinAccount."
+    }
+    else
+    {
+        log "$unjoinAccount is enabled; setting password..."
+        Set-LocalUser -Name $unjoinAccount -Password $password -PasswordNeverExpires $true
+        log "Successfully set password for $unjoinAccount."
+    }
+    $cred = New-Object -TypeName System.Management.Automation.PSCredential -ArgumentList ("$hostname\$unjoinAccount", $password)
+    log "Unjoining $hostname from domain..."
+    Remove-Computer -UnjoinDomainCredential $cred -PassThru -Force -Verbose
+    log "Successfully unjoined $hostname from domain."
+}
+
 # Leave Domain/Hybrid Join
 if($pc.domainJoined -eq "YES")
 {
     log "PC is Domain/Hybrid Joined.  Leaving Domain..."
     try
     {
-        unjoinDomain -unjoinAccount "Administrator" -hostname $pc.hostname
+        unjoinDomain -unjoinAccount "Administrator"
         log "PC left Domain successfully."
     }
     catch
@@ -492,6 +632,115 @@ else
 {
     log "PC is not Domain/Hybrid Joined."
 }
+
+
+################### SCCM SECTION ###################
+# FUNCTION: removeSCCM
+# DESCRIPTION: Removes the SCCM client from the device.
+function removeSCCM()
+{
+    [CmdletBinding()]
+    Param(
+        [string]$CCMpath = "C:\Windows\ccmsetup\ccmsetup.exe",
+        [array]$services = @("CcmExec","smstsmgr","CmRcService","ccmsetup"),
+        [string]$CCMProcess = "ccmsetup",
+        [string]$servicesRegPath = "HKLM:\SYSTEM\CurrentControlSet\Services\",
+        [string]$ccmRegPath = "HKLM:\SOFTWARE\Microsoft\CCM",
+        [array]$sccmKeys = @("CCM","SMS","CCMSetup"),
+        [string]$CSPPath = "HKLM:\SOFTWARE\Microsoft\DeviceManageabilityCSP",
+        [array]$sccmFolders = @("C:\Windows\ccm","C:\Windows\ccmsetup","C:\Windows\ccmcache","C:\Windows\ccmcache2","C:\Windows\SMSCFG.ini",
+        "C:\Windows\SMS*.mif"),
+        [array]$sccmNamespaces = @("ccm","sms")
+    )
+    
+    # Remove SCCM client
+    log "Removing SCCM client..."
+    if(Test-Path $CCMpath)
+    {
+        log "Uninstalling SCCM client..."
+        Start-Process -FilePath $CCMpath -ArgumentList "/uninstall" -Wait
+        if($CCMProcess)
+        {
+            log "SCCM client still running; killing..."
+            Stop-Process -Name $CCMProcess -Force -ErrorAction SilentlyContinue
+            log "Killed SCCM client."
+        }
+        else
+        {
+            log "SCCM client uninstalled successfully."
+        }
+        # Stop SCCM services
+        foreach($service in $services)
+        {
+            $serviceStatus = Get-Service -Name $service -ErrorAction SilentlyContinue
+            if($serviceStatus)
+            {
+                log "Stopping $service..."
+                Stop-Service -Name $service -Force -ErrorAction SilentlyContinue
+                log "Stopped $service."
+            }
+            else
+            {
+                log "$service not found."
+            }
+        }
+        # Remove WMI Namespaces
+        foreach($namespace in $sccmNamespaces)
+        {
+            Get-WmiObject -Query "SELECT * FROM __Namespace WHERE Name = '$namespace'" -Namespace "root" | Remove-WmiObject
+        }
+        # Remove SCCM registry keys
+        foreach($service in $services)
+        {
+            $serviceKey = $servicesRegPath + $service
+            if(Test-Path $serviceKey)
+            {
+                log "Removing $serviceKey registry key..."
+                Remove-Item -Path $serviceKey -Recurse -Force -ErrorAction SilentlyContinue
+                log "Removed $serviceKey registry key."
+            }
+            else
+            {
+                log "$serviceKey registry key not found."
+            }
+        }
+        foreach($key in $sccmKeys)
+        {
+            $keyPath = $ccmRegPath + "\" + $key
+            if(Test-Path $keyPath)
+            {
+                log "Removing $keyPath registry key..."
+                Remove-Item -Path $keyPath -Recurse -Force -ErrorAction SilentlyContinue
+                log "Removed $keyPath registry key."
+            }
+            else
+            {
+                log "$keyPath registry key not found."
+            }
+        }
+        # Remove CSP
+        Remove-Item -Path $CSPPath -Recurse -Force -ErrorAction SilentlyContinue
+        # Remove SCCM folders
+        foreach($folder in $sccmFolders)
+        {
+            if(Test-Path $folder)
+            {
+                log "Removing $folder..."
+                Remove-Item -Path $folder -Recurse -Force -ErrorAction SilentlyContinue
+                log "Removed $folder."
+            }
+            else
+            {
+                log "$folder not found."
+            }
+        }
+    }
+    else
+    {
+        log "SCCM client not found."
+    }
+}
+
 
 # Remove SCCM client if required
 log "Checking for SCCM client..."
@@ -589,6 +838,28 @@ if($pc.mdm -eq $true)
 else
 {
     log "PC is not MDM enrolled."
+}
+# FUNCTION: setAutoLogonAdmin
+# DESCRIPTION: Sets the auto logon account for the administrator 
+# PARAMETERS: $username - The username to set auto logon for, $password - The password to set auto logon for.
+function setAutoLogonAdmin()
+{
+    Param(
+        [string]$regPath = "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon",
+        [string]$regName = "AutoAdminLogon",
+        [string]$migrateAdmin = "MigrationInProgress"
+    )
+    log "Creating local admin account..."
+    $adminPW = generatePassword
+    $adminGroup = Get-CimInstance -Query "Select * From Win32_Group Where LocalAccount = True And SID = 'S-1-5-32-544'"
+    $adminGroupName = $adminGroup.Name
+    New-LocalUser -Name $migrateAdmin -Password $adminPW
+    Add-LocalGroupMember -Group $adminGroupName -Member $migrateAdmin
+    log "Successfully created local admin account."
+    reg.exe add $regPath /v "AutoAdminLogon" /t REG_SZ /d 0 /f | Out-Host
+    reg.exe add $regPath /v "DefaultUserName" /t REG_SZ /d $migrateAdmin /f | Out-Host
+    reg.exe add $regPath /v "DefaultPassword" /t REG_SZ /d "@Password*123" | Out-Host
+    log "Successfully set auto logon to $migrateAdmin."
 }
 
 # Set Auto logon Admin account
