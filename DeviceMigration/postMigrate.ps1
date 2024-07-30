@@ -14,151 +14,161 @@ Jesse Weimer
 
 $ErrorActionPreference = "SilentlyContinue"
 
-# Import the module
-Import-Module "$($psscriptroot)\DeviceMigration.psm1" -Force
+# log function
+function log()
+{
+    [Cmdletbinding()]
+    Param(
+        [Parameter(Mandatory=$true)]
+        [string]$message
+    )
+    $timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss tt"
+    Write-Output "$timestamp - $message"
+}
+
+# FUNCTION: msGraphAuthenticate
+# DESCRIPTION: Authenticates to Microsoft Graph.
+function msGraphAuthenticate()
+{
+    [CmdletBinding()]
+    Param(
+        [Parameter(Mandatory=$true)]
+        [string]$tenantName,
+        [Parameter(Mandatory=$true)]
+        [string]$clientId,
+        [Parameter(Mandatory=$true)]
+        [string]$clientSecret
+    )
+    $headers = New-Object "System.Collections.Generic.Dictionary[[String],[String]]"
+    $headers.Add("Content-Type", "application/x-www-form-urlencoded")
+    $body = "grant_type=client_credentials&scope=https://graph.microsoft.com/.default"
+    $body += -join ("&client_id=" , $clientId, "&client_secret=", $clientSecret)
+    $response = Invoke-RestMethod "https://login.microsoftonline.com/$tenantName/oauth2/v2.0/token" -Method 'POST' -Headers $headers -Body $body
+    # Get token from OAuth response
+
+    $token = -join ("Bearer ", $response.access_token)
+
+    # Reinstantiate headers
+    $headers = New-Object "System.Collections.Generic.Dictionary[[String],[String]]"
+    $headers.Add("Authorization", $token)
+    $headers.Add("Content-Type", "application/json")
+    $headers = @{'Authorization'="$($token)"}
+    return $headers
+}
 
 # Import settings from the JSON file
-$config = Get-Content "$($psscriptroot)\config.json" | ConvertFrom-Json
+$config = Get-Content "C:\ProgramData\IntuneMigration\config.json" | ConvertFrom-Json
 
 # Start Transcript
-Start-Transcript -Path "$($config.logPath)\DeviceMigration.log" -Append -Verbose
+Start-Transcript -Path "$($config.logPath)\postMigrate.log" -Verbose
 log "Starting PostMigrate.ps1..."
 
 # Initialize script
-log "Initializing script postMigrate.ps1..."
-try
+$localPath = $config.localPath
+if(!(Test-Path $localPath))
 {
-    initializeScript
-    log "Script initialized."
+    log "$($localPath) does not exist.  Creating..."
+    mkdir $localPath
 }
-catch
+else
 {
-    $message = $_.Exception.Message
-    log "Error initializing script: $message"
-    exitScript -exitCode 4 -functionName "initializeScript"
+    log "$($localPath) already exists."
 }
+
+# Check context
+$context = whoami
+log "Running as $($context)"
 
 # disable postMigrate task
 log "Disabling postMigrate task..."
 Disable-ScheduledTask -TaskName "postMigrate"
 log "postMigrate task disabled."
 
+# enable displayLastUserName
+log "Enabling displayLastUserName..."
+Set-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System" -Name "DontDisplayLastUserName" -Value 0 -Verbose
+log "Enabled displayLastUserName."
+
 # authenticate to target tenant if exists
 if($config.targetTenant.tenantName)
 {
     log "Authenticating to target tenant..."
-    try
-    {
-        $headers = msGraphAuthenticate -targetTenant $config.targetTenant.tenantName -clientID $config.targetTenant.clientID -clientSecret $config.targetTenant.clientSecret
-        log "Authenticated to target tenant."
-    }
-    catch
-    {
-        $message = $_.Exception.Message
-        log "Error authenticating to target tenant: $message"
-        exitScript -exitCode 5 -functionName "authenticateToTargetTenant"
-    }
+    $headers = msGraphAuthenticate -tenantName $config.targetTenant.tenantName -clientID $config.targetTenant.clientID -clientSecret $config.targetTenant.clientSecret
+    log "Authenticated to target tenant."
 }
 else
 {
     log "No target tenant specified.  Authenticating into source tenant."
-    try
-    {
-        $headers = msGraphAuthenticate -sourceTenant $config.sourceTenant.tenantName -clientID $config.sourceTenant.clientID -clientSecret $config.sourceTenant.clientSecret
-        log "Authenticated to source tenant."
-    }
-    catch
-    {
-        $message = $_.Exception.Message
-        log "Error authenticating to source tenant: $message"
-        exitScript -exitCode 6 -functionName "authenticateToSourceTenant"
-    }
+    $headers = msGraphAuthenticate -tenantName $config.sourceTenant.tenantName -clientID $config.sourceTenant.clientID -clientSecret $config.sourceTenant.clientSecret
+    log "Authenticated to source tenant."
 }
 
 # Get current device Intune and Entra attributes
 log "Getting current device attributes..."
 $intuneDeviceId = ((Get-ChildItem "Cert:\LocalMachine\My" | Where-Object {$_.Issuer -match "Microsoft Intune MDM Device CA"} | Select-Object Subject).Subject).TrimStart("CN=")
 $entraDeviceId = ((Get-ChildItem "Cert:\LocalMachine\My" | Where-Object {$_.Issuer -match "MS-Organization-Access"} | Select-Object Subject).Subject).TrimStart("CN=")
+$entraId = (Invoke-RestMethod -Method Get -Uri "https://graph.microsoft.com/beta/devices?`$filter=deviceid eq '$entraDeviceId'" -Headers $headers).value.id
 
-# FUNCTION: setPrimaryUser
-function setPrimaryUser()
+# setPrimaryUser
+[string]$targetUserId = (Get-ItemProperty -Path "HKLM:\SOFTWARE\IntuneMigration" -Name "NEW_entraUserID").NEW_entraUserID
+[string]$sourceUserId = (Get-ItemProperty -Path "HKLM:\SOFTWARE\IntuneMigration" -Name "OLD_entraUserID").OLD_entraUserID
+    
+if([string]::IsNullOrEmpty($targetUserId))
 {
-    param(
-        [string]$targetUserId = (Get-ItemProperty -Path "HKLM:\SOFTWARE\IntuneMigration" -Name "NEW_entraUserID").NEW_entraUserID,
-        [string]$sourceUserId = (Get-ItemProperty -Path "HKLM:\SOFTWARE\IntuneMigration" -Name "OLD_entraUserID").OLD_entraUserID
-    )
-    if([string]::IsNullOrEmpty($targetUserId))
-    {
-        log "Target user not found- proceeding with source user $($sourceUserId)."
-        $userId = $sourceUserId
-    }
-    else
-    {
-        log "Target user found- proceeding with target user $($targetUserId)."
-        $userId = $targetUserId
-    }
-    $userUri = "https://graph.microsoft.com/beta/users/$userId"
-    $id = "@odata.id"
-    $JSON = @{ $id=$userUri } | ConvertTo-Json
-    Invoke-RestMethod -Uri "https://graph.microsoft.com/beta/deviceManagement/managedDevices/$intuneDeviceId/users/`$reg" -Method Post -Headers $headers -Body $JSON
-    log "Primary user set to $($userId)."
+    log "Target user not found- proceeding with source user $($sourceUserId)."
+    $userId = $sourceUserId
 }
-
-# run setPrimaryUser
-log "Setting primary user..."
+else
+{
+    log "Target user found- proceeding with target user $($targetUserId)."
+    $userId = $targetUserId
+}
+$userUri = "https://graph.microsoft.com/beta/users/$userId"
+$id = "@odata.id"
+$JSON = @{ $id=$userUri } | ConvertTo-Json
 try
 {
-    setPrimaryUser
-    log "Primary user set."
+    Invoke-RestMethod -Uri "https://graph.microsoft.com/beta/deviceManagement/managedDevices/$intuneDeviceId/users/`$ref" -Method Post -Headers $headers -Body $JSON -ContentType "application/json"
+    log "Primary user set to $($userId)."
 }
 catch
 {
     $message = $_.Exception.Message
     log "Error setting primary user: $message"
-    exitScript -exitCode 4 -functionName "setPrimaryUser"
 }
 
-# FUNCTION: updateGroupTag
-function updateGroupTag()
+# updateGroupTag
+$groupTag = (Get-ItemProperty -Path "HKLM:\SOFTWARE\IntuneMigration" -Name "OLD_groupTag").OLD_groupTag
+if([string]::IsNullOrEmpty($groupTag))
 {
-    [cmdletbinding()]
-    Param(
-        [Parameter(Mandatory=$true)]
-        [string]$groupTag
-    )
     log "Updating group tag to $($groupTag)..."
-    $entraDeviceObject = Invoke-RestMethod -Uri "https://graph.microsoft.com/beta/devices/$entraDeviceId" -Headers $headers
+    $entraDeviceObject = Invoke-RestMethod -Uri "https://graph.microsoft.com/beta/devices/$entraId" -Headers $headers
     $physicalIds = $entraDeviceObject.physicalIds
     $groupTag = "[OrderID]:$groupTag"
     $physicalIds += $groupTag
+
     $body = @{
         physicalIds = $physicalIds
     } | ConvertTo-Json
-    Invoke-RestMethod -Uri "https://graph.microsoft.com/beta/devices/$entraDeviceId" -Method Patch -Headers $headers -Body $body
-    log "Group tag updated to $($groupTag)."
-}
-
-# run updateGroupTag
-$groupTag = (Get-ItemProperty -Path "HKLM:\SOFTWARE\IntuneMigration" -Name "OLG_groupTag").OLD_groupTag
-if([string]::IsNullOrEmpty($groupTag))
-{
-    log "Group tag not found."
-}
-else
-{
-    log "Group tag found- proceeding with group tag $($groupTag)."
+        
     try
     {
-        updateGroupTag -groupTag $groupTag
-        log "Group tag updated."
+        Invoke-RestMethod -Uri "https://graph.microsoft.com/beta/devices/$entraId" -Method Patch -Headers $headers -Body $body
+        log "Group tag updated to $($groupTag)."
     }
     catch
     {
         $message = $_.Exception.Message
         log "Error updating group tag: $message"
-        exitScript -exitCode 7 -functionName "updateGroupTag"
     }
 }
+else
+{
+    log "No group tag found."
+}
+
+
+
 
 # FUNCTION: migrateBitlockerKey
 function migrateBitlockerKey()
@@ -203,7 +213,6 @@ if($config.bitlocker -eq "MIGRATE")
     {
         $message = $_.Exception.Message
         log "Error migrating bitlocker recovery key: $message"
-        exitScript -exitCode 8 -functionName "migrateBitlockerKey"
     }
 }
 elseif($config.bitlocker -eq "DECRYPT")
@@ -218,7 +227,6 @@ elseif($config.bitlocker -eq "DECRYPT")
     {
         $message = $_.Exception.Message
         log "Error decrypting drive: $message"
-        exitScript -exitCode 9 -functionName "decryptDrive"
     }
 }
 else
@@ -232,21 +240,20 @@ log "Registering device in Autopilot..."
 # Get hardware info
 $serialNumber = (Get-CimInstance -ClassName Win32_BIOS).SerialNumber
 $hardwareId = ((Get-CimInstance -Namespace root/cimv2/mdm/dmmap -ClassName MDM_DevDetail_Ext01 -Filter "InstanceID='Ext' AND ParentID='./DevDetail'").DeviceHardwareData)
-$tag = (Get-ItemProperty -Path "HKLM:\SOFTWARE\IntuneMigration" -Name "OLG_groupTag").OLD_groupTag
-if([string]::IsNullOrEmpty($tag))
+if([string]::IsNullOrEmpty($groupTag))
 {
-    $groupTag = ""
+    $tag = ""
 }
 else
 {
-    $groupTag = $tag
+    $tag = $groupTag
 }
 
 # Construct JSON
 $json = @"
 {
     "@odata.type": "#microsoft.graph.importedWindowsAutopilotDeviceIdentity",
-    "groupTag":"$groupTag",
+    "groupTag":"$tag",
     "serialNumber":"$serialNumber",
     "productKey":"",
     "hardwareIdentifier":"$hardwareId",
@@ -271,8 +278,25 @@ catch
 {
     $message = $_.Exception.Message
     log "Error registering device in Autopilot: $message"
-    exitScript -exitCode 4 -functionName "registerDeviceInAutopilot"
 }
+
+# reset lock screen caption
+# Specify the registry key path
+$registryKeyPath = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System"
+
+# Specify the names of the registry entries to delete
+$entryNames = @("legalnoticecaption", "legalnoticetext")
+
+# Loop through each entry and delete it
+foreach ($entryName in $entryNames) {
+    try {
+        Remove-ItemProperty -Path $registryKeyPath -Name $entryName -Force
+        log "Deleted registry entry: $entryName"
+    } catch {
+        log "Failed to delete registry entry: $entryName. Error: $_"
+    }
+}
+
 
 # Cleanup
 log "Cleaning up migration files..."
@@ -290,7 +314,7 @@ foreach($task in $tasks)
 
 # Remove MigrationUser
 log "Removing MigrationUser..."
-Remove-LocalUser -Name "MigrationInProgress"
+Remove-LocalUser -Name "MigrationInProgress" -Force
 log "MigrationUser removed."
 
 # End Transcript

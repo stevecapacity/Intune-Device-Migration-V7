@@ -17,35 +17,130 @@ Jesse Weimer
 
 $ErrorActionPreference = "SilentlyContinue"
 
-# Import module from same directory
-Import-Module "$($PSScriptRoot)\DeviceMigration.psm1" -Force
+# log function
+function log()
+{
+    [Cmdletbinding()]
+    Param(
+        [Parameter(Mandatory=$true)]
+        [string]$message
+    )
+    $timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss tt"
+    Write-Output "$timestamp - $message"
+}
+
+# FUNCTION: exitScript
+# DESCRIPTION: Exits the script with error code and takes action depending on the error code.
+function exitScript()
+{
+    [Cmdletbinding()]
+    Param(
+        [Parameter(Mandatory=$true)]
+        [int]$exitCode,
+        [Parameter(Mandatory=$true)]
+        [string]$functionName,
+        [array]$tasks = @("reboot","postMigrate")
+    )
+    if($exitCode -eq 1)
+    {
+        log "Exiting script with critical error on $($functionName)."
+        log "Disabling tasks..."
+        foreach($task in $tasks)
+        {
+            Disable-ScheduledTask -TaskName $task -Verbose
+            log "Disabled $($task) task."
+        }
+        log "Enabling password logon provider..."
+        reg.exe add "HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Authentication\Credential Providers\{60b78e88-ead8-445c-9cfd-0b87f74ea6cd}" /v "Disabled" /t REG_DWORD /d 0 /f | Out-Host
+        log "Enabled logon provider."
+        log "Rebooting device..."
+        Stop-Transcript
+        shutdown -r -t 30
+    }
+    else
+    {
+        log "Migration script failed.  Review logs at C:\ProgramData\Microsoft\IntuneManagementExtension\Logs"
+    }
+}
+
+# FUNCTION: generatePassword
+# DESCRIPTION: Generates a random password.
+# PARAMETERS: $length - The length of the password to generate.
+
+function generatePassword()
+{
+    Param(
+        [int]$length = 12
+    )
+    $charSet = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789!@#$%^&*()-_=+[]{}|;:',<.>/?"
+    $securePassword = New-Object -TypeName System.Security.SecureString
+    1..$length | ForEach-Object {
+        $random = $charSet[(Get-Random -Minimum 0 -Maximum $charSet.Length)]
+        $securePassword.AppendChar($random)
+    }
+    return $securePassword
+}
+
+# FUNCTION: msGraphAuthenticate
+# DESCRIPTION: Authenticates to Microsoft Graph.
+function msGraphAuthenticate()
+{
+    [CmdletBinding()]
+    Param(
+        [Parameter(Mandatory=$true)]
+        [string]$tenantName,
+        [Parameter(Mandatory=$true)]
+        [string]$clientId,
+        [Parameter(Mandatory=$true)]
+        [string]$clientSecret
+    )
+    $headers = New-Object "System.Collections.Generic.Dictionary[[String],[String]]"
+    $headers.Add("Content-Type", "application/x-www-form-urlencoded")
+    $body = "grant_type=client_credentials&scope=https://graph.microsoft.com/.default"
+    $body += -join ("&client_id=" , $clientId, "&client_secret=", $clientSecret)
+    $response = Invoke-RestMethod "https://login.microsoftonline.com/$tenantName/oauth2/v2.0/token" -Method 'POST' -Headers $headers -Body $body
+    # Get token from OAuth response
+
+    $token = -join ("Bearer ", $response.access_token)
+
+    # Reinstantiate headers
+    $headers = New-Object "System.Collections.Generic.Dictionary[[String],[String]]"
+    $headers.Add("Authorization", $token)
+    $headers.Add("Content-Type", "application/json")
+    $headers = @{'Authorization'="$($token)"}
+    return $headers
+}
 
 # Import config settings from JSON file
-$config = Get-Content "$($PSScriptRoot)\config.json" | ConvertFrom-Json
+$config = Get-Content ".\config.json" | ConvertFrom-Json
 
 # Start Transcript
-Start-Transcript -Path "$($config.logPath)\DeviceMigration.log" -Append -Verbose
+Start-Transcript -Path "$($config.logPath)\startMigrate.log" -Verbose
 log "Starting Device Migration V-7..."
 
 # Initialize script
-log "Initializing startMigrate.ps1..."
-try
+$localPath = $config.localPath
+if(!(Test-Path $localPath))
 {
-    initializeScript -installTag $true
-    log "Script initialized successfully."
+    log "$($localPath) does not exist.  Creating..."
+    mkdir $localPath
 }
-catch
+else
 {
-    $message = $_.Exception.Message
-    log "Failed to initialize script. Error: $message"
-    log "Exiting script."
-    exitScript -exitCode 4 -functionName "initializeScript"
+    log "$($localPath) already exists."
 }
+
+# Set Intune install tag
+New-Item -ItemType File -Path "$($localPath)\install.tag" -Force -Verbose
+
+# Check context
+$context = whoami
+log "Running as $($context)"
 
 # Copy package files to local machine
 $destination = $config.localPath
 log "Copying package files to $($destination)..."
-Copy-Item -Path "$($PSScriptRoot)\*" -Destination $destination -Recurse -Force
+Copy-Item -Path ".\*" -Destination $destination -Recurse -Force
 log "Package files copied successfully."
 
 # Authenticate to source tenant if exists
@@ -119,228 +214,182 @@ else
 # FUNCTION: deviceObject
 # DESCRIPTION: Creates a device object and writes values to registry.
 # PARAMETERS: $hostname - The hostname of the device, $serialNumber - The serial number of the device, $azureAdJoined - Whether the device is Azure AD joined, $domainJoined - Whether the device is domain joined, $certPath - The path to the certificate store, $intuneIssuer - The Intune certificate issuer, $azureIssuer - The Azure certificate issuer, $groupTag - The group tag, $mdm - Whether the device is MDM enrolled.
-function deviceObject()
+
+[object]$headers = $sourceHeaders
+[string]$hostname = $env:COMPUTERNAME
+[string]$serialNumber = (Get-CimInstance -ClassName Win32_BIOS).SerialNumber
+[string]$azureAdJoined = (dsregcmd.exe /status | Select-String "AzureAdJoined").ToString().Split(":")[1].Trim()
+[string]$domainjoined = (dsregcmd.exe /status | Select-String "DomainJoined").ToString().Split(":")[1].Trim()
+[string]$certPath = "Cert:\LocalMachine\My"
+[string]$intuneIssuer = "Microsoft Intune MDM Device CA"
+[string]$azureIssuer = "MS-Organization-Access"
+[string]$groupTag = $config.groupTag
+[string]$regPath = $config.regPath
+[bool]$mdm = $false
+# Get Intune device certificate
+$cert = Get-ChildItem -Path $certPath | Where-Object {$_.Issuer -match $intuneIssuer}
+# Get Intune and Entra device IDs if certificate exists
+if($cert)
 {
-    [CmdletBinding()]
-    Param(
-        [object]$headers,
-        [string]$hostname = $env:COMPUTERNAME,
-        [string]$serialNumber = (Get-CimInstance -ClassName Win32_BIOS).SerialNumber,
-        [string]$azureAdJoined = (dsregcmd.exe /status | Select-String "AzureAdJoined").ToString().Split(":")[1].Trim(),
-        [string]$domainjoined = (dsregcmd.exe /status | Select-String "DomainJoined").ToString().Split(":")[1].Trim(),
-        [string]$certPath = "Cert:\LocalMachine\My",
-        [string]$intuneIssuer = "Microsoft Intune MDM Device CA",
-        [string]$azureIssuer = "MS-Organization-Access",
-        [string]$groupTag = $config.groupTag,
-        [string]$regPath = $config.regPath,
-        [bool]$mdm = $false
-    )
-    # Get Intune device certificate
-    $cert = Get-ChildItem -Path $certPath | Where-Object {$_.Issuer -match $intuneIssuer}
-    # Get Intune and Entra device IDs if certificate exists
-    if($cert)
+    $mdm = $true
+    $intuneId = ((Get-ChildItem -Path $certPath | Where-Object {$_.Issuer -match $intuneIssuer} | Select-Object Subject).Subject).TrimStart("CN=")
+    $entraDeviceId = ((Get-ChildItem -Path $certPath | Where-Object {$_.Issuer -match $azureIssuer} | Select-Object Subject).Subject).TrimStart("CN=")
+    # Get Autopilot object if headers provided
+    if($headers)
     {
-        $mdm = $true
-        $intuneId = ((Get-ChildItem $cert | Select-Object Subject).Subject).TrimStart("CN=")
-        $entraDeviceId = ((Get-ChildItem $certPath | Where-Object {$_.Issuer -match $azureIssuer} | Select-Object Subject).Subject).TrimStart("CN=")
-        # Get Autopilot object if headers provided
-        if($headers)
+        log "Headers provided.  Checking for Autopilot object..."
+        $autopilotObject = (Invoke-RestMethod -Method Get -Uri "https://graph.microsoft.com/beta/deviceManagement/windowsAutopilotDeviceIdentities?`$filter=contains(serialNumber,'$($serialNumber)')" -Headers $headers)
+        if(($autopilotObject.'@odata.count') -eq 1)
         {
-            log "Headers provided.  Checking for Autopilot object..."
-            $autopilotObject = (Invoke-RestMethod -Method Get -Uri "https://graph.microsoft.com/beta/deviceManagement/windowsAutopilotDeviceIdentities?`$filter=contains(serialNumber,'$($serialNumber)')" -Headers $headers)
-            if(($autopilotObject.'@odata.count') -eq 1)
+            $autopilotId = $autopilotObject.value.id
+            if([string]::IsNullOrEmpty($groupTag))
             {
-                $autopilotId = $autopilotObject.value.id
-                if([string]::IsNullOrEmpty($groupTag))
-                {
-                    $groupTag = $autopilotObject.value.groupTag
-                }
-                else
-                {
-                    $groupTag = $groupTag
-                }
+                $groupTag = $autopilotObject.value.groupTag
             }
-        }
-        else
-        {
-            log "Headers not provided.  Skipping Autopilot object check."            
-            $autopilotObject = $null
+            else
+            {
+                $groupTag = $groupTag
+            }
         }
     }
     else
     {
-        $intuneId = $null
-        $entraDeviceId = $null
-        $autopilotId = $null
+        log "Headers not provided.  Skipping Autopilot object check."            
+        $autopilotObject = $null
     }
-    if([string]::IsNullOrEmpty($groupTag))
+}
+else
+{
+    $intuneId = $null
+    $entraDeviceId = $null
+    $autopilotId = $null
+}
+if([string]::IsNullOrEmpty($groupTag))
+{
+    $groupTag = $null
+}
+else
+{
+    $groupTag = $groupTag
+}
+if($domainjoined -eq "YES")
+{
+    $localDomain = Get-ItemPropertyValue -Path "HKLM:\SYSTEM\CurrentControlSet\Services\Tcpip\Parameters" -Name "Domain"
+}
+else
+{
+    $localDomain = $null
+}
+$pc = @{
+    hostname = $hostname
+    serialNumber = $serialNumber
+    azureAdJoined = $azureAdJoined
+    domainJoined = $domainJoined
+    intuneId = $intuneId
+    entraDeviceId = $entraDeviceId
+    autopilotId = $autopilotId
+    groupTag = $groupTag
+    mdm = $mdm
+    localDomain = $localDomain
+}
+# Write device object to registry
+log "Writing device object to registry..."
+foreach($x in $pc.Keys)
+{
+    $pcName = "OLD_$($x)"
+    $pcValue = $($pc[$x])
+    # Check if value is null or empty
+    if(![string]::IsNullOrEmpty($pcValue))
     {
-        $groupTag = $null
+        log "Writing $($pcName) with value $($pcValue)."
+        try
+        {
+            reg.exe add $regPath /v $pcName /t REG_SZ /d $pcValue /f | Out-Host
+            log "Successfully wrote $($pcName) with value $($pcValue)."
+        }
+        catch
+        {
+            $message = $_.Exception.Message
+            log "Failed to write $($pcName) with value $($pcValue).  Error: $($message)."
+        }
     }
     else
     {
-        $groupTag = $groupTag
+        log "Value for $($pcName) is null.  Not writing to registry."
     }
-    if($domainjoined -eq "YES")
-    {
-        $localDomain = Get-ItemPropertyValue -Path "HKLM:\SYSTEM\CurrentControlSet\Services\Tcpip\Parameters" -Name "Domain"
-    }
-    else
-    {
-        $localDomain = $null
-    }
-    $pc = @{
-        hostname = $hostname
-        serialNumber = $serialNumber
-        azureAdJoined = $azureAdJoined
-        domainJoined = $domainJoined
-        intuneId = $intuneId
-        entraDeviceId = $entraDeviceId
-        autopilotId = $autopilotId
-        groupTag = $groupTag
-        mdm = $mdm
-        localDomain = $localDomain
-    }
-    # Write device object to registry
-    log "Writing device object to registry..."
-    foreach($x in $pc.Keys)
-    {
-        $name = "OLD_$($x)"
-        $value = $($pc[$x])
-        # Check if value is null or empty
-        if(![string]::IsNullOrEmpty($value))
-        {
-            log "Writing $($name) with value $($value)."
-            try
-            {
-                reg.exe add $regPath /v $name /t REG_SZ /d $value /f | Out-Host
-                log "Successfully wrote $($name) with value $($value)."
-            }
-            catch
-            {
-                $message = $_.Exception.Message
-                log "Failed to write $($name) with value $($value).  Error: $($message)."
-            }
-        }
-        else
-        {
-            log "Value for $($name) is null.  Not writing to registry."
-        }
-    }
-    return $pc
 }
 
-# Create OLD device object
-log "Creating current (OLD) device object record..."
-try
+# get current user info
+[object]$headers = $sourceHeaders
+[string]$domainJoined = $pc.domainJoined
+[string]$azureAdJoined = $pc.azureAdJoined
+[string]$regPath = $config.regPath
+[string]$userName = (Get-CimInstance -ClassName Win32_ComputerSystem | Select-Object UserName).UserName
+[string]$SID = (New-Object System.Security.Principal.NTAccount($userName)).Translate([System.Security.Principal.SecurityIdentifier]).Value
+[string]$profilePath = (Get-ItemPropertyValue -Path "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList\$($SID)" -Name "ProfileImagePath")
+[string]$SAMName = ($userName).Split("\")[1]
+    
+# If PC is NOT domain joined, get UPN from cache
+if($domainJoined -eq "NO")
 {
-    $pc = deviceObject -headers $sourceHeaders
-    log "Current (OLD) device object record created successfully."
-}
-catch
-{
-    $message = $_.Exception.Message
-    log "Failed to create current (OLD) device object record. Error: $message"
-    log "Exiting script."
-    exitScript -exitCode 4 -functionName "deviceObject"
-}
-
-# FUNCTION: userObject
-# DESCRIPTION: Creates a user object and writes values to registry.
-# PARAMETERS: $domainJoined - Whether the user is domain joined, $azureAdJoined - Whether the user is Azure AD joined, $headers - The headers for the REST API call.
-function userObject()
-{
-    [CmdletBinding()]
-    Param(
-        [string]$domainJoined = $pc.domainJoined,
-        [string]$azureAdJoined = $pc.azureAdJoined,
-        [object]$headers,
-        [string]$regPath = $config.regPath,
-        [string]$user = (Get-CimInstance -ClassName Win32_ComputerSystem | Select-Object UserName).UserName,
-        [string]$SID = (New-Object System.Security.Principal.NTAccount($user)).Translate([System.Security.Principal.SecurityIdentifier]).Value,
-        [string]$profilePath = (Get-ItemPropertyValue -Path "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList\$($SID)" -Name "ProfileImagePath"),
-        [string]$SAMName = ($user).Split("\")[1]
-    )
-    # If PC is NOT domain joined, get UPN from cache
-    if($domainJoined -eq "NO")
+    $upn = (Get-ItemPropertyValue -Path "HKLM:\SOFTWARE\Microsoft\IdentityStore\Cache\$($SID)\IdentityCache\$($SID)" -Name "UserName")
+    # If PC is Azure AD joined, get user ID from Graph
+    if($azureAdJoined -eq "YES")
     {
-        $upn = (Get-ItemPropertyValue -Path "HKLM:\SOFTWARE\Microsoft\IdentityStore\Cache\$($SID)\IdentityCache\$($SID)" -Name "UserName")
-        # If PC is Azure AD joined, get user ID from Graph
-        if($azureAdJoined -eq "YES")
-        {
-            $entraUserId = (Invoke-RestMethod -Method Get -Uri "https://graph.microsoft.com/beta/users/$($upn)" -Headers $headers).id
-        }
-        else
-        {
-            $entraUserId = $null
-        }
+        $entraUserId = (Invoke-RestMethod -Method Get -Uri "https://graph.microsoft.com/beta/users/$($upn)" -Headers $headers).id
     }
     else
     {
-        $upn = $null
         $entraUserId = $null
     }
-    $user = @{
-        user = $user
-        upn = $upn
-        entraUserId = $entraUserId
-        profilePath = $profilePath
-        SAMName = $SAMName
-        SID = $SID
-    }
-    # Write user object to registry
-    foreach($x in $user.Keys)
+}
+else
+{
+    $upn = $null
+    $entraUserId = $null
+}
+$currentUser = @{
+    userName = $userName
+    upn = $upn
+    entraUserId = $entraUserId
+    profilePath = $profilePath
+    SAMName = $SAMName
+    SID = $SID
+}
+# Write user object to registry
+foreach($x in $currentUser.Keys)
+{
+    $currentUserName = "OLD_$($x)"
+    $currentUserValue = $($currentUser[$x])
+    # Check if value is null or empty
+    if(![string]::IsNullOrEmpty($currentUserValue))
     {
-        $name = "OLD_$($x)"
-        $value = $($user[$x])
-        # Check if value is null or empty
-        if(![string]::IsNullOrEmpty($value))
+        log "Writing $($currentUserName) with value $($currentUserValue)."
+        try
         {
-            log "Writing $($name) with value $($value)."
-            try
-            {
-                reg.exe add $regPath /v $name /t REG_SZ /d $value /f | Out-Host
-                log "Successfully wrote $($name) with value $($value)."
-            }
-            catch
-            {
-                $message = $_.Exception.Message
-                log "Failed to write $($name) with value $($value).  Error: $($message)."
-            }
+            reg.exe add $regPath /v $currentUserName /t REG_SZ /d $currentUserValue /f | Out-Host
+            log "Successfully wrote $($currentUserName) with value $($currentUserValue)."
+        }
+        catch
+        {
+            $message = $_.Exception.Message
+            log "Failed to write $($currentUserName) with value $($currentUserValue).  Error: $($message)."
         }
     }
-    return $user
-}
-
-
-# Create OLD user object
-log "Creating current (OLD) user object record..."
-try
-{
-    $currentUser = userObject -headers $sourceHeaders
-    log "Current (OLD) user object record created successfully."
-}
-catch
-{
-    $message = $_.Exception.Message
-    log "Failed to create current (OLD) user object record. Error: $message"
-    log "Exiting script."
-    exitScript -exitCode 4 -functionName "userObject"
 }
 
 # Attempt to get new user info based on current SAMName
-$sam = $currentUser.SAMName
-$newUser = $null
+$currentUPN = ($currentUser.upn).Split("@")[0]
 # If target tenant headers exist, get new user object
 if($targetHeaders)
 {
-    $newUserObject = Invoke-WebRequest -Method GET -Uri "https://graph.microsoft.com/beta/users?`$filter=startsWith(userPrincipalName,'$sam')" -Headers $targetHeaders
+    $newUserObject = Invoke-RestMethod -Method GET -Uri "https://graph.microsoft.com/beta/users?`$filter=startsWith(userPrincipalName,'$currentUPN')" -Headers $targetHeaders
     # if new user graph request is successful, set new user object
-    if($newUserObject.StatusCode -eq 200)
+    if($newUserObject)
     {
         log "New user found in $($config.targetTenant.tenantName) tenant."
         $newUser = @{
-            user = $newUserObject.value.userPrincipalName
+            upn = $newUserObject.value.userPrincipalName
             entraUserId = $newUserObject.value.id
             SAMName = $newUserObject.value.userPrincipalName.Split("@")[0]
             SID = $newUserObject.value.securityIdentifier
@@ -399,7 +448,7 @@ if($targetHeaders)
                 {
                     log "New user found in $($config.targetTenant.tenantName) tenant."
                     $newUser = @{
-                        user = $newUserObject.userPrincipalName
+                        upn = $newUserObject.userPrincipalName
                         entraUserId = $newUserObject.id
                         SAMName = $newUserObject.userPrincipalName.Split("@")[0]
                         SID = $newUserObject.securityIdentifier
@@ -420,22 +469,22 @@ if($targetHeaders)
         }
     }
     # Write new user object to registry
-    foreach($x in $newUser)
+    foreach($x in $newUser.Keys)
     {
-        $name = "NEW_$($x)"
-        $value = $($newUser[$x])
-        if(![string]::IsNullOrEmpty($value))
+        $newUserName = "NEW_$($x)"
+        $newUserValue = $($newUser[$x])
+        if(![string]::IsNullOrEmpty($newUserValue))
         {
-            log "Writing $($name) with value $($value)."
+            log "Writing $($newUserName) with value $($newUserValue)."
             try
             {
-                reg.exe add $config.regPath /v $name /t REG_SZ /d $value /f | Out-Host
-                log "Successfully wrote $($name) with value $($value)."
+                reg.exe add $config.regPath /v $newUserName /t REG_SZ /d $newUserValue /f | Out-Host
+                log "Successfully wrote $($newUserName) with value $($newUserValue)."
             }
             catch
             {
                 $message = $_.Exception.Message
-                log "Failed to write $($name) with value $($value).  Error: $($message)."
+                log "Failed to write $($newUserName) with value $($newUserValue).  Error: $($message)."
             }
         }
     }
@@ -822,7 +871,7 @@ if($pc.mdm -eq $true)
         log "Deleting Autopilot object..."
         try
         {
-            Invoke-RestMethod -Method Delete -Uri "https://graph.microsoft.com/beta/deviceManagement/importedWindowsAutopilotDeviceIdentities/$($pc.autopilotId)" -Headers $sourceHeaders
+            Invoke-RestMethod -Method Delete -Uri "https://graph.microsoft.com/beta/deviceManagement/windowsAutopilotDeviceIdentities/$($pc.autopilotId)" -Headers $sourceHeaders
             Start-Sleep -Seconds 2
             log "Autopilot object deleted successfully."
         }
@@ -845,7 +894,7 @@ else
 function setAutoLogonAdmin()
 {
     Param(
-        [string]$regPath = "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon",
+        [string]$regPath = "HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon",
         [string]$regName = "AutoAdminLogon",
         [string]$migrateAdmin = "MigrationInProgress"
     )
@@ -878,67 +927,24 @@ catch
 }
 
 # Enable auto logon
-log "Enabling auto logon..."
-try
-{
-    toggleAutoLogon -enable $true
-    log "Auto logon enabled successfully."
-}
-catch
-{
-    $message = $_.Exception.Message
-    log "Failed to enable auto logon. Error: $message"
-    log "Exiting script."
-    exitScript -exitCode 4 -functionName "toggleAutoLogon"
-}
+Set-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon" -Name "AutoAdminLogon" -Value 1 -Verbose
+log "Auto logon enabled."
 
-# Disable logon provider
-log "Disabling logon provider..."
-try
-{
-    toggleLogonProvider -enable $false
-    log "Logon provider disabled successfully."
-}
-catch
-{
-    $message = $_.Exception.Message
-    log "Failed to disable logon provider. Error: $message"
-    log "Exiting script."
-    exitScript -exitCode 4 -functionName "disableLogonProvider"
-}
+# Disable password logon provider
+reg.exe add "HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Authentication\Credential Providers\{60b78e88-ead8-445c-9cfd-0b87f74ea6cd}" /v "Disabled" /t REG_DWORD /d 1 /f | Out-Host
+log "Password logon provider disabled."
 
 # Disable DisplayLastUser
-log "Disabling DisplayLastUser..."
-try
-{
-    toggleDisplayLastUser -enable $false
-    log "DisplayLastUser disabled successfully."
-}
-catch
-{
-    $message = $_.Exception.Message
-    log "Failed to disable DisplayLastUser. Error: $message"
-    log "Exiting script."
-    exitScript -exitCode 4 -functionName "disableDisplayLastUser"
-}
+Set-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System" -Name "DontDisplayLastUserName" -Value 1 -Verbose
+log "DisplayLastUser disabled."
 
 # Set lock screen caption
-log "Setting lock screen caption..."
-try 
-{
-    setLockScreenCaption -caption "Device Migration in Progress..." -text "Your PC is being migrated to the $($config.targetTenant.tenantName) tenant and will automatically reboot in 30 seconds.  Please do not power off."
-    log "Lock screen caption set successfully."
-}
-catch 
-{
-    $message = $_.Exception.Message
-    log "Failed to set lock screen caption. Error: $message"
-    log "Exiting script."
-    exitScript -exitCode 4 -functionName "setLockScreenCaption"
-}
+reg.exe add "HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System" /v "legalnoticecaption" /t REG_SZ /d "Device Migration in Progress..." /f | Out-Host 
+reg.exe add "HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System" /v "legalnoticetext" /t REG_SZ /d "Your PC is being migrated to the $($config.targetTenant.tenantName) tenant and will automatically reboot in 30 seconds.  Please do not power off." /f | Out-Host
+log "Lock screen caption set successfully."
 
 # Stop transcript and restart
-log "$pc.hostname will reboot in 30 seconds..."
+log "$($pc.hostname) will reboot in 30 seconds..."
 Stop-Transcript
 shutdown -r -t 30
 

@@ -14,29 +14,74 @@ Jesse Weimer
 
 $ErrorActionPreference = "SilentlyContinue"
 
-# Import module
-Import-Module "$($PSScriptRoot)\DeviceMigration.psm1" -Force
+# log function
+function log()
+{
+    [Cmdletbinding()]
+    Param(
+        [Parameter(Mandatory=$true)]
+        [string]$message
+    )
+    $timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss tt"
+    Write-Output "$timestamp - $message"
+}
+
+# FUNCTION: exitScript
+# DESCRIPTION: Exits the script with error code and takes action depending on the error code.
+function exitScript()
+{
+    [Cmdletbinding()]
+    Param(
+        [Parameter(Mandatory=$true)]
+        [int]$exitCode,
+        [Parameter(Mandatory=$true)]
+        [string]$functionName,
+        [array]$tasks = @("reboot","postMigrate")
+    )
+    if($exitCode -eq 1)
+    {
+        log "Exiting script with critical error on $($functionName)."
+        log "Disabling tasks..."
+        foreach($task in $tasks)
+        {
+            Disable-ScheduledTask -TaskName $task -Verbose
+            log "Disabled $($task) task."
+        }
+        log "Enabling password logon provider..."
+        reg.exe add "HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Authentication\Credential Providers\{60b78e88-ead8-445c-9cfd-0b87f74ea6cd}" /v "Disabled" /t REG_DWORD /d 0 /f | Out-Host
+        log "Enabled logon provider."
+        log "Rebooting device..."
+        Stop-Transcript
+        shutdown -r -t 30
+    }
+    else
+    {
+        log "Migration script failed.  Review logs at C:\ProgramData\Microsoft\IntuneManagementExtension\Logs"
+    }
+}
 
 # Import config settings from JSON file
-$config = Get-Content "$($PSScriptRoot)\config.json" | ConvertFrom-Json
+$config = Get-Content "C:\ProgramData\IntuneMigration\config.json" | ConvertFrom-Json
 
 # Start Transcript
-Start-Transcript -Path "$($config.logPath)\DeviceMigration.log" -Append -Verbose
+Start-Transcript -Path "$($config.logPath)\reboot.log" -Verbose
 log "Starting Reboot.ps1..."
 
 # Initialize script
-log "Initializing Reboot.ps1..."
-try
+$localPath = $config.localPath
+if(!(Test-Path $localPath))
 {
-    initializeScript
-    log "Script initialized"
+    log "$($localPath) does not exist.  Creating..."
+    mkdir $localPath
 }
-catch
+else
 {
-    $message = $_.Exception.Message
-    log "Error initializing script: $message"
-    exitScript -exitCode 1 -functionName "initializeScript"
+    log "$($localPath) already exists."
 }
+
+# Check context
+$context = whoami
+log "Running as $($context)"
 
 # disable reboot task
 log "Disabling reboot task..."
@@ -44,27 +89,16 @@ Disable-ScheduledTask -TaskName "Reboot"
 log "Reboot task disabled"
 
 # disable auto logon
-log "Disabling auto logon..."
-try
-{
-    toggleAutoLogon -enable $false
-    log "Auto logon disabled"
-}
-catch
-{
-    $message = $_.Exception.Message
-    log "Error disabling auto logon: $message"
-    exitScript -exitCode 1 -functionName "disableAutoLogon"
-}
+Set-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon" -Name "AutoAdminLogon" -Value 0 -Verbose
+log "Auto logon enabled."
 
 # Retrieve variables from registry
 log "Retrieving variables from registry..."
-$regKey = "Registry::$config.regPath"
-$values = (Get-ItemProperty -Path $regKey).Property
-foreach($x in $values)
-{
-    $name = $x
-    $value = (Get-ItemProperty -Path $regKey).$x
+$regKey = "Registry::$($config.regPath)"
+$values = Get-ItemProperty -Path $regKey
+$values.PSObject.Properties | ForEach-Object {
+    $name = $_.Name
+    $value = $_.Value
     if(![string]::IsNullOrEmpty($value))
     {
         log "Retrieved $($name): $value"
@@ -77,8 +111,9 @@ foreach($x in $values)
     }
 }
 
+
 # Remove aadBrokerPlugin from profile
-$aadBrokerPath = (Get-ChildItem -Path "$($OLD_profilePath)\AppData\Local\Packages" -Recures | Where-Object {$_.Name -match "Microsoft.AAD.BrokerPlugin_*"}).FullName
+$aadBrokerPath = (Get-ChildItem -Path "$($OLD_profilePath)\AppData\Local\Packages" -Recurse | Where-Object {$_.Name -match "Microsoft.AAD.BrokerPlugin_*"}).FullName
 if($aadBrokerPath)
 {
     log "Removing aadBrokerPlugin from profile..."
@@ -89,6 +124,52 @@ else
 {
     log "aadBrokerPlugin not found"
 }
+
+# Create new user profile
+log "Creating $($NEW_SAMName) profile..."
+Add-Type -TypeDefinition @"
+using System;
+using System.Security.Principal;
+using System.Runtime.InteropServices;
+namespace UserProfile {
+    public static class Class {
+        [DllImport("userenv.dll", SetLastError = true, CharSet = CharSet.Auto)]
+        public static extern int CreateProfile(
+            [MarshalAs(UnmanagedType.LPWStr)] String pszUserSid,
+            [MarshalAs(UnmanagedType.LPWStr)] String pszUserName,
+            [Out][MarshalAs(UnmanagedType.LPWStr)] System.Text.StringBuilder pszProfilePath,
+            uint cchProfilePath
+        );
+    }
+}
+"@
+
+$sb      = New-Object System.Text.StringBuilder(260)
+$pathLen = $sb.Capacity
+
+try {
+    $CreateProfileReturn = [UserProfile.Class]::CreateProfile($NEW_SID, $NEW_SAMName, $sb, $pathLen)
+} catch {
+    Write-Error $_.Exception.Message
+}
+
+switch ($CreateProfileReturn) {
+    0 {
+        Write-Output "User profile created successfully at path: $($sb.ToString())"
+    }
+    -2147024713 {
+        Write-Output "User profile already exists."
+    }
+    default {
+        throw "An error occurred when creating the user profile: $CreateProfileReturn"
+    }
+}
+
+# Delete New profile
+log "Deleting new profile..."
+$newProfile = Get-CimInstance -ClassName Win32_UserProfile | Where-Object {$_.SID -eq $NEW_SID}
+Remove-CimInstance -InputObject $newProfile -Verbose | Out-Null
+log "New profile deleted."
 
 # Change ownership of user profile
 log "Changing ownership of user profile..."
@@ -443,49 +524,17 @@ else
     log "Machine is domain joined - skipping updateSamNameIdentityStore."
 }
 
-# enable displayLastUserName
-log "Enabling displayLastUserName..."
-try
-{
-    toggleDisplayLastUserName -enable $true
-    log "displayLastUserName enabled"
-}
-catch
-{
-    $message = $_.Exception.Message
-    log "Error enabling displayLastUserName: $message"
-    exitScript -exitCode 1 -functionName "toggleDisplayLastUserName"
-}
-
 # enable logon provider
-log "Enabling logon provider..."
-try
-{
-    toggleLogonProvider -enable $true
-    log "Logon provider enabled"
-}
-catch
-{
-    $message = $_.Exception.Message
-    log "Error enabling logon provider: $message"
-    exitScript -exitCode 1 -functionName "toggleLogonProvider"
-}
+reg.exe add "HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Authentication\Credential Providers\{60b78e88-ead8-445c-9cfd-0b87f74ea6cd}" /v "Disabled" /t REG_DWORD /d 0 /f | Out-Host
+log "Enabled logon provider."
 
 # set lock screen caption
-log "Setting lock screen caption..."
-try
-{
-    setLockScreenCaption -caption "Welcome to $($config.targetTenant.tenantName)" -text "Please log in with your new email address"
-    log "Lock screen caption set"
-}
-catch
-{
-    $message = $_.Exception.Message
-    log "Error setting lock screen caption: $message"
-    exitScript -exitCode 1 -functionName "setLockScreenCaption"
-}
+reg.exe add "HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System" /v "legalnoticecaption" /t REG_SZ /d "Welcome to $($config.targetTenant.tenantName)" /f | Out-Host 
+reg.exe add "HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System" /v "legalnoticetext" /t REG_SZ /d "Please log in with your new email address" /f | Out-Host
+log "Lock screen caption set."
+
 
 log "Reboot.ps1 complete"
+shutdown -r -t 00
 Stop-Transcript
 
-shutdown -r -t 5
