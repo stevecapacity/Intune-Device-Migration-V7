@@ -3,14 +3,14 @@
     "logPath":"C:\\ProgramData\\Microsoft\\IntuneManagementExtension\\Logs",
     "regPath":"HKLM\\SOFTWARE\\IntuneMigration",
     "sourceTenant": {
-        "clientId":"85735004-cd61-43c3-80f1-5a8cce4b82ff",
-        "clientSecret":"k~m8Q~KDt~5UbEHBHEerMEm94MbPNyBb8APLQbRJ",
-        "tenantName":"stevecapacity.com"
+        "clientId":"<clientId>",
+        "clientSecret":"<clientSecret>",
+        "tenantName":"<tenantName>.com"
     },
     "targetTenant":{
-        "clientId":"ee094836-00b3-4737-a45a-eb24d0363f94",
-        "clientSecret":"Zyw8Q~LC40zwrIXytmqmF6ky8Dr5yvGxWXeJ.ax9",
-        "tenantName":"rubixdev.com"
+        "clientId":"<clientId>",
+        "clientSecret":"<clientSecret>",
+        "tenantName":"<tenantName>.com"
     },
     "groupTag":"",
     "bitlockerMethod":"migrate",
