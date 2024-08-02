@@ -529,7 +529,15 @@ reg.exe add "HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Authentication\Crede
 log "Enabled logon provider."
 
 # set lock screen caption
-reg.exe add "HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System" /v "legalnoticecaption" /t REG_SZ /d "Welcome to $($config.targetTenant.tenantName)" /f | Out-Host 
+if($config.targetTenant.tenantName)
+{
+    $tenant = $config.targetTenant.tenantName
+}
+else
+{
+    $tenant = $config.sourceTenant.tenantName
+}
+reg.exe add "HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System" /v "legalnoticecaption" /t REG_SZ /d "Welcome to $($tenant)" /f | Out-Host 
 reg.exe add "HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System" /v "legalnoticetext" /t REG_SZ /d "Please log in with your new email address" /f | Out-Host
 log "Lock screen caption set."
 

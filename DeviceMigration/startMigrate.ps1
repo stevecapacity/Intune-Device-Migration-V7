@@ -381,118 +381,123 @@ foreach($x in $currentUser.Keys)
 # Attempt to get new user info based on current SAMName
 $currentUPN = ($currentUser.upn).Split("@")[0]
 # If target tenant headers exist, get new user object
+$newHeaders = ""
 if($targetHeaders)
 {
-    $newUserObject = Invoke-RestMethod -Method GET -Uri "https://graph.microsoft.com/beta/users?`$filter=startsWith(userPrincipalName,'$currentUPN')" -Headers $targetHeaders
-    # if new user graph request is successful, set new user object
-    if($newUserObject)
-    {
-        log "New user found in $($config.targetTenant.tenantName) tenant."
-        $newUser = @{
-            upn = $newUserObject.value.userPrincipalName
-            entraUserId = $newUserObject.value.id
-            SAMName = $newUserObject.value.userPrincipalName.Split("@")[0]
-            SID = $newUserObject.value.securityIdentifier
-        }
-    }
-    else
-    {
-        # Make sure nuget package is installed
-        $installedNuget = Get-PackageProvider -Name NuGet -ListAvailable -ErrorAction SilentlyContinue
-        if(-not($installedNuget))
-        {
-            log "NuGet package provider not installed.  Installing..."
-            Install-PackageProvider -Name NuGet -Force
-            log "NuGet package provider installed successfully."
-        }
-        else
-        {
-            log "NuGet package provider already installed."
-        }
-        # Check for Az.Accounts module
-        $installedAzAccounts = Get-Module -Name Az.Accounts -ErrorAction SilentlyContinue
-        if(-not($installedAzAccounts))
-        {
-            log "Az.Accounts module not installed.  Installing..."
-            Install-Module -Name Az.Accounts -Force
-            Import-Module Az.Accounts
-            log "Az.Accounts module installed successfully."
-        }
-        else
-        {
-            log "Az.Accounts module already installed."
-            Import-Module Az.Accounts
-        }
-        try
-        {
-            Connect-AzAccount
-            $token = Get-AzAccessToken -ResourceUrl "https://graph.microsoft.com/"
-            #Get Token form OAuth
-            $token = -join("Bearer ", $token.Token)
+    $newHeaders = $targetHeaders
+}
+else
+{
+    $newHeaders = $sourceHeaders
+}
 
-            #Reinstantiate headers
-            $headers = New-Object "System.Collections.Generic.Dictionary[[String],[String]]"
-            $headers.Add("Authorization", $token)
-            $headers.Add("Content-Type", "application/json")
 
-            $output = Invoke-RestMethod -Uri "https://graph.microsoft.com/v1.0/me" -Headers $headers -Method "GET"
-            $newUPN = $output.userPrincipalName
-            if([string]::IsNullOrEmpty($newUPN))
-            {
-                Log "New user not found in $($config.targetTenant.tenantName) tenant."
-            }
-            else
-            {
-                $newUserObject = Invoke-WebRequest -Method GET -Uri "https://graph.microsoft.com/beta/users/$newUPN" -Headers $targetHeaders
-                if($newUserObject.StatusCode -eq 200)
-                {
-                    log "New user found in $($config.targetTenant.tenantName) tenant."
-                    $newUser = @{
-                        upn = $newUserObject.userPrincipalName
-                        entraUserId = $newUserObject.id
-                        SAMName = $newUserObject.userPrincipalName.Split("@")[0]
-                        SID = $newUserObject.securityIdentifier
-                    }
-                }
-                else
-                {
-                    log "New user not found in $($config.targetTenant.tenantName) tenant."
-                }
-            }
-        }
-        catch
-        {
-            $message = $_.Exception.Message
-            log "Failed to get new user object. Error: $message"
-            log "Exiting script."
-            exitScript -exitCode 4 -functionName "newUserObject"
-        }
-    }
-    # Write new user object to registry
-    foreach($x in $newUser.Keys)
-    {
-        $newUserName = "NEW_$($x)"
-        $newUserValue = $($newUser[$x])
-        if(![string]::IsNullOrEmpty($newUserValue))
-        {
-            log "Writing $($newUserName) with value $($newUserValue)."
-            try
-            {
-                reg.exe add $config.regPath /v $newUserName /t REG_SZ /d $newUserValue /f | Out-Host
-                log "Successfully wrote $($newUserName) with value $($newUserValue)."
-            }
-            catch
-            {
-                $message = $_.Exception.Message
-                log "Failed to write $($newUserName) with value $($newUserValue).  Error: $($message)."
-            }
-        }
+$newUserObject = Invoke-RestMethod -Method GET -Uri "https://graph.microsoft.com/beta/users?`$filter=startsWith(userPrincipalName,'$currentUPN')" -Headers $newHeaders
+# if new user graph request is successful, set new user object
+if($newUserObject)
+{
+    log "New user found in $($config.targetTenant.tenantName) tenant."
+    $newUser = @{
+        upn = $newUserObject.value.userPrincipalName
+        entraUserId = $newUserObject.value.id
+        SAMName = $newUserObject.value.userPrincipalName.Split("@")[0]
+        SID = $newUserObject.value.securityIdentifier
     }
 }
 else
 {
-    log "Target tenant headers not provided.  Skipping new user object creation."
+    # Make sure nuget package is installed
+    $installedNuget = Get-PackageProvider -Name NuGet -ListAvailable -ErrorAction SilentlyContinue
+    if(-not($installedNuget))
+    {
+        log "NuGet package provider not installed.  Installing..."
+        Install-PackageProvider -Name NuGet -Force
+        log "NuGet package provider installed successfully."
+    }
+    else
+    {
+        log "NuGet package provider already installed."
+    }
+    # Check for Az.Accounts module
+    $installedAzAccounts = Get-Module -Name Az.Accounts -ErrorAction SilentlyContinue
+    if(-not($installedAzAccounts))
+    {
+        log "Az.Accounts module not installed.  Installing..."
+        Install-Module -Name Az.Accounts -Force
+        Import-Module Az.Accounts
+        log "Az.Accounts module installed successfully."
+    }
+    else
+    {
+        log "Az.Accounts module already installed."
+        Import-Module Az.Accounts
+    }
+    try
+    {
+        Connect-AzAccount
+        $token = Get-AzAccessToken -ResourceUrl "https://graph.microsoft.com/"
+        #Get Token form OAuth
+        $token = -join("Bearer ", $token.Token)
+
+        #Reinstantiate headers
+        $headers = New-Object "System.Collections.Generic.Dictionary[[String],[String]]"
+        $headers.Add("Authorization", $token)
+        $headers.Add("Content-Type", "application/json")
+
+        $output = Invoke-RestMethod -Uri "https://graph.microsoft.com/v1.0/me" -Headers $headers -Method "GET"
+        $newUPN = $output.userPrincipalName
+        if([string]::IsNullOrEmpty($newUPN))
+        {
+            Log "New user not found in $($config.targetTenant.tenantName) tenant."
+        }
+        else
+        {
+            $newUserObject = Invoke-WebRequest -Method GET -Uri "https://graph.microsoft.com/beta/users/$newUPN" -Headers $targetHeaders
+            if($newUserObject.StatusCode -eq 200)
+            {
+                log "New user found in $($config.targetTenant.tenantName) tenant."
+                $newUser = @{
+                    upn = $newUserObject.userPrincipalName
+                    entraUserId = $newUserObject.id
+                    SAMName = $newUserObject.userPrincipalName.Split("@")[0]
+                    SID = $newUserObject.securityIdentifier
+                }
+            }
+            else
+            {
+                log "New user not found in $($config.targetTenant.tenantName) tenant."
+            }
+        }
+    }
+    catch
+    {
+        $message = $_.Exception.Message
+        log "Failed to get new user object. Error: $message"
+        log "Exiting script."
+        exitScript -exitCode 4 -functionName "newUserObject"
+    }
 }
+# Write new user object to registry
+foreach($x in $newUser.Keys)
+{
+    $newUserName = "NEW_$($x)"
+    $newUserValue = $($newUser[$x])
+    if(![string]::IsNullOrEmpty($newUserValue))
+    {
+        log "Writing $($newUserName) with value $($newUserValue)."
+        try
+        {
+            reg.exe add $config.regPath /v $newUserName /t REG_SZ /d $newUserValue /f | Out-Host
+            log "Successfully wrote $($newUserName) with value $($newUserValue)."
+        }
+        catch
+        {
+            $message = $_.Exception.Message
+            log "Failed to write $($newUserName) with value $($newUserValue).  Error: $($message)."
+        }
+    }
+}
+
 
 
 
@@ -939,8 +944,16 @@ Set-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies
 log "DisplayLastUser disabled."
 
 # Set lock screen caption
+if($targetHeaders)
+{
+    $tenant = $config.targetTenant.tenantName
+}
+else
+{
+    $tenant = $config.sourceTenant.tenantName
+}
 reg.exe add "HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System" /v "legalnoticecaption" /t REG_SZ /d "Device Migration in Progress..." /f | Out-Host 
-reg.exe add "HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System" /v "legalnoticetext" /t REG_SZ /d "Your PC is being migrated to the $($config.targetTenant.tenantName) tenant and will automatically reboot in 30 seconds.  Please do not power off." /f | Out-Host
+reg.exe add "HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System" /v "legalnoticetext" /t REG_SZ /d "Your PC is being migrated to the $($tenant) tenant and will automatically reboot in 30 seconds.  Please do not power off." /f | Out-Host
 log "Lock screen caption set successfully."
 
 # Stop transcript and restart
