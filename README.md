@@ -4,4 +4,6 @@ The Intune Device Migration solution allows devices to be off-boarded from their
 
 Using a custom solution that leverages PowerShell scripting, Microsoft Graph API, and Windows provisioning packages, organizations can migrate Windows PCs between tenants with minimal downtime and user disruption.
 
-Full documentation is now available at https://stevecapacity.github.io/intune-device-migration-documentation/
+Full documentation is now available at https://stevecapacity.github.io/intune-device-migration-documentation/ hosted on GitHub pages.
+
+Thanks for stopping by.
