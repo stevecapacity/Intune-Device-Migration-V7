@@ -409,7 +409,6 @@ if($newUserObject)
         SID = $newUserObject.value.securityIdentifier
     }
 }
-else
 {
     # Make sure nuget package is installed
     $installedNuget = Get-PackageProvider -Name NuGet -ListAvailable -ErrorAction SilentlyContinue
@@ -449,14 +448,15 @@ else
         $headers.Add("Authorization", $token)
         $headers.Add("Content-Type", "application/json")
 
-        $output = Invoke-RestMethod -Uri "https://graph.microsoft.com/v1.0/me" -Headers $headers -Method "GET"
+        $output = Invoke-RestMethod -Uri "https://graph.microsoft.com/beta/me" -Headers $headers -Method "GET"
+
         if([bool] $output.psobject.Properties['userPrincipalName'])
         {
             Log "New user not found in $($config.targetTenant.tenantName) tenant."
         }
         else
         {
-            $newUserObject = Invoke-RestMethod -Method Get -Uri "https://graph.microsoft.com/beta/users/$($output.userPrincipalName)" -Headers $newHeaders
+            $newUserObject = Invoke-WebRequest -Method GET -Uri "https://graph.microsoft.com/beta/users/$($output.userPrincipalName)" -Headers $targetHeaders
             if($newUserObject.StatusCode -eq 200)
             {
                 log "New user found in $($config.targetTenant.tenantName) tenant."
@@ -479,8 +479,8 @@ else
         log "Failed to get new user object. Error: $message"
         log "Exiting script."
         exitScript -exitCode 4 -functionName "newUserObject"
-    }    
-}        
+    }
+}       
 
 # Write new user object to registry
 foreach($x in $newUser.Keys)
