@@ -379,7 +379,14 @@ foreach($x in $currentUser.Keys)
 }
 
 # Attempt to get new user info based on current SAMName
-$currentUPN = ($currentUser.upn).Split("@")[0]
+if($pc.domainJoined -eq "YES")
+{
+    $currentUPN = $currentUser.SAMName
+}
+else
+{
+    $currentUPN = ($currentUser.upn).Split("@")[0]
+}
 # If target tenant headers exist, get new user object
 $newHeaders = ""
 if($targetHeaders)
@@ -390,8 +397,6 @@ else
 {
     $newHeaders = $sourceHeaders
 }
-
-
 $newUserObject = Invoke-RestMethod -Method GET -Uri "https://graph.microsoft.com/beta/users?`$filter=startsWith(userPrincipalName,'$currentUPN')" -Headers $newHeaders
 # if new user graph request is successful, set new user object
 if($newUserObject)
@@ -445,14 +450,13 @@ else
         $headers.Add("Content-Type", "application/json")
 
         $output = Invoke-RestMethod -Uri "https://graph.microsoft.com/v1.0/me" -Headers $headers -Method "GET"
-        $newUPN = $output.userPrincipalName
-        if([string]::IsNullOrEmpty($newUPN))
+        if([bool] $output.psobject.Properties['userPrincipalName'])
         {
             Log "New user not found in $($config.targetTenant.tenantName) tenant."
         }
         else
         {
-            $newUserObject = Invoke-WebRequest -Method GET -Uri "https://graph.microsoft.com/beta/users/$newUPN" -Headers $targetHeaders
+            $newUserObject = Invoke-RestMethod -Method Get -Uri "https://graph.microsoft.com/beta/users/$($output.userPrincipalName)" -Headers $newHeaders
             if($newUserObject.StatusCode -eq 200)
             {
                 log "New user found in $($config.targetTenant.tenantName) tenant."
@@ -475,8 +479,9 @@ else
         log "Failed to get new user object. Error: $message"
         log "Exiting script."
         exitScript -exitCode 4 -functionName "newUserObject"
-    }
-}
+    }    
+}        
+
 # Write new user object to registry
 foreach($x in $newUser.Keys)
 {
