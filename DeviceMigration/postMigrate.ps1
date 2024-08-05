@@ -139,7 +139,7 @@ catch
 
 # updateGroupTag
 $groupTag = (Get-ItemProperty -Path "HKLM:\SOFTWARE\IntuneMigration" -Name "OLD_groupTag").OLD_groupTag
-if([string]::IsNullOrEmpty($groupTag))
+if(![string]::IsNullOrEmpty($groupTag))
 {
     log "Updating group tag to $($groupTag)..."
     $entraDeviceObject = Invoke-RestMethod -Uri "https://graph.microsoft.com/beta/devices/$entraId" -Headers $headers
