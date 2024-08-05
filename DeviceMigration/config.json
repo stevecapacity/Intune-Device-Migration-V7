@@ -12,7 +12,7 @@
         "clientSecret":"<clientSecret>",
         "tenantName":"<tenantName>.com"
     },
-    "groupTag":"",
-    "bitlockerMethod":"migrate",
+    "groupTag":"<groupTag>",
+    "bitlockerMethod":"<migrate/decrypt>",
     "SCCM":false
 }
