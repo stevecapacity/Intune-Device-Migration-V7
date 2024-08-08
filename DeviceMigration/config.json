@@ -13,6 +13,6 @@
         "tenantName":"<tenantName>.com"
     },
     "groupTag":"<groupTag>",
-    "bitlockerMethod":"<migrate/decrypt>",
+    "bitlocker":"<migrate/decrypt>",
     "SCCM":false
 }
