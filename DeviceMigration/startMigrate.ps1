@@ -53,13 +53,21 @@ function exitScript()
         log "Enabling password logon provider..."
         reg.exe add "HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Authentication\Credential Providers\{60b78e88-ead8-445c-9cfd-0b87f74ea6cd}" /v "Disabled" /t REG_DWORD /d 0 /f | Out-Host
         log "Enabled logon provider."
-        log "Rebooting device..."
+        log "Exiting script... please reboot device."
         Stop-Transcript
-        shutdown -r -t 30
+        exit 1
     }
     else
     {
         log "Migration script failed.  Review logs at C:\ProgramData\Microsoft\IntuneManagementExtension\Logs"
+        log "Disabling tasks..."
+        foreach($task in $tasks)
+        {
+            Disable-ScheduledTask -TaskName $task -Verbose
+            log "Disabled $($task) task."
+        }
+        log "Exiting script."
+        exit 0
     }
 }
 
@@ -450,7 +458,7 @@ if($newUserObject)
 
         $output = Invoke-RestMethod -Uri "https://graph.microsoft.com/beta/me" -Headers $headers -Method "GET"
 
-        if([bool] $output.psobject.Properties['userPrincipalName'])
+        if(![bool] $output.psobject.Properties['userPrincipalName'])
         {
             Log "New user not found in $($config.targetTenant.tenantName) tenant."
         }
@@ -620,19 +628,20 @@ else
     log "PC is not Azure AD Joined."
 }
 
-# FUNCTION: unjoinDomain
-# DESCRIPTION: Unjoins the device from the domain.
-# PARAMETERS: $unjoinAccount - The account to unjoin the device with, $hostname - The hostname of the device.
 
-function unjoinDomain()
+# Leave Domain/Hybrid Join
+$migrateAdmin = "MigrationInProgress"
+$adminPW = generatePassword
+$adminGroup = Get-CimInstance -Query "Select * From Win32_Group Where LocalAccount = True And SID = 'S-1-5-32-544'"
+$adminGroupName = $adminGroup.Name
+New-LocalUser -Name $migrateAdmin -Password $adminPW -PasswordNeverExpires
+Add-LocalGroupMember -Group $adminGroupName -Member $migrateAdmin
+
+if($pc.domainJoined -eq "YES")
 {
-    [CmdletBinding()]
-    Param(
-        [Parameter(Mandatory=$true)]
-        [string]$unjoinAccount,
-        [string]$hostname = $pc.hostname,
-        [string]$localDomain = $pc.localDomain
-    )
+    [string]$hostname = $pc.hostname,
+    [string]$localDomain = $pc.localDomain
+
     # Check for line of sight to domain controller
     $pingCount = 4
     $pingResult = Test-Connection -ComputerName $localDomain -Count $pingCount
@@ -647,50 +656,39 @@ function unjoinDomain()
     {
         log "$($hostname) has no line of sight to domain controller."
     }
-    $password = generatePassword
-    log "Generated password for $unjoinAccount."
-    log "Checking $unjoinAccount status..."
-    [bool]$acctStatus = (Get-LocalUser -Name $unjoinAccount).Enabled
+    log "Checking $migrateAdmin status..."
+    [bool]$acctStatus = (Get-LocalUser -Name $migrateAdmin).Enabled
     if($acctStatus -eq $false)
     {
-        log "$unjoinAccount is disabled; setting password and enabling..."
-        Set-LocalUser -Name $unjoinAccount -Password $password -PasswordNeverExpires $true
-        Get-LocalUser -Name $unjoinAccount | Enable-LocalUser
-        log "Successfully set password and enabled $unjoinAccount."
+        log "$migrateAdmin is disabled; setting password and enabling..."
+        Get-LocalUser -Name $migrateAdmin | Enable-LocalUser
+        log "Successfully enabled $migrateAdmin."
     }
     else
     {
-        log "$unjoinAccount is enabled; setting password..."
-        Set-LocalUser -Name $unjoinAccount -Password $password -PasswordNeverExpires $true
-        log "Successfully set password for $unjoinAccount."
+        log "$migrateAdmin is already enabled."
     }
-    $cred = New-Object -TypeName System.Management.Automation.PSCredential -ArgumentList ("$hostname\$unjoinAccount", $password)
-    log "Unjoining $hostname from domain..."
-    Remove-Computer -UnjoinDomainCredential $cred -PassThru -Force -Verbose
-    log "Successfully unjoined $hostname from domain."
-}
-
-# Leave Domain/Hybrid Join
-if($pc.domainJoined -eq "YES")
-{
-    log "PC is Domain/Hybrid Joined.  Leaving Domain..."
     try
     {
-        unjoinDomain -unjoinAccount "Administrator"
-        log "PC left Domain successfully."
+        $cred = New-Object -TypeName System.Management.Automation.PSCredential -ArgumentList ("$hostname\$migrateAdmin", $adminPW)
+        log "Unjoining $hostname from domain..."
+        Remove-Computer -UnjoinDomainCredential $cred -PassThru -Force -Verbose
+        log "Successfully unjoined $hostname from domain."
     }
     catch
     {
         $message = $_.Exception.Message
-        log "Failed to leave Domain. Error: $message"
+        log "Failed to unjoin $hostname from domain. Error: $message"
         log "Exiting script."
-        exitScript -exitCode 4 -functionName "unjoinDomain"
+        exitScript -exitCode 4 -functionName "Remove-Computer"
     }
 }
 else
 {
-    log "PC is not Domain/Hybrid Joined."
+    log "PC is not domain joined."
 }
+
+
 
 
 ################### SCCM SECTION ###################
@@ -832,7 +830,7 @@ if($ppkg)
     try
     {
         Install-ProvisioningPackage -PackagePath $ppkg -QuietInstall -Force
-        log "Provisioning package installed successfully."
+        log "Provisioning package installed."
     }
     catch
     {
@@ -901,40 +899,15 @@ else
 # FUNCTION: setAutoLogonAdmin
 # DESCRIPTION: Sets the auto logon account for the administrator 
 # PARAMETERS: $username - The username to set auto logon for, $password - The password to set auto logon for.
-function setAutoLogonAdmin()
-{
-    Param(
-        [string]$regPath = "HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon",
-        [string]$regName = "AutoAdminLogon",
-        [string]$migrateAdmin = "MigrationInProgress"
-    )
-    log "Creating local admin account..."
-    $adminPW = generatePassword
-    $adminGroup = Get-CimInstance -Query "Select * From Win32_Group Where LocalAccount = True And SID = 'S-1-5-32-544'"
-    $adminGroupName = $adminGroup.Name
-    New-LocalUser -Name $migrateAdmin -Password $adminPW
-    Add-LocalGroupMember -Group $adminGroupName -Member $migrateAdmin
-    log "Successfully created local admin account."
-    reg.exe add $regPath /v "AutoAdminLogon" /t REG_SZ /d 0 /f | Out-Host
-    reg.exe add $regPath /v "DefaultUserName" /t REG_SZ /d $migrateAdmin /f | Out-Host
-    reg.exe add $regPath /v "DefaultPassword" /t REG_SZ /d "@Password*123" | Out-Host
-    log "Successfully set auto logon to $migrateAdmin."
-}
 
-# Set Auto logon Admin account
-log "Setting Auto logon Admin account..."
-try
-{
-    setAutoLogonAdmin
-    log "Auto logon Admin account set successfully."
-}
-catch
-{
-    $message = $_.Exception.Message
-    log "Failed to set Auto logon Admin account. Error: $message"
-    log "Exiting script."
-    exitScript -exitCode 4 -functionName "setAutoLogonAdmin"
-}
+    
+[string]$autoLogonPath = "HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon"
+log "Creating local admin account..."
+log "Successfully created local admin account."
+reg.exe add $autoLogonPath /v "AutoAdminLogon" /t REG_SZ /d 0 /f | Out-Host
+reg.exe add $autoLogonPath /v "DefaultUserName" /t REG_SZ /d $migrateAdmin /f | Out-Host
+reg.exe add $autoLogonPath /v "DefaultPassword" /t REG_SZ /d "@Password*123" | Out-Host
+log "Successfully set auto logon to $migrateAdmin."
 
 # Enable auto logon
 Set-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon" -Name "AutoAdminLogon" -Value 1 -Verbose

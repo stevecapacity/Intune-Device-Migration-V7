@@ -26,6 +26,48 @@ function log()
     Write-Output "$timestamp - $message"
 }
 
+# FUNCTION: exitScript
+# DESCRIPTION: Exits the script with a critical error.
+function exitScript()
+{
+    [Cmdletbinding()]
+    Param(
+        [Parameter(Mandatory=$true)]
+        [int]$exitCode,
+        [Parameter(Mandatory=$true)]
+        [string]$functionName,
+        [array]$tasks = @("reboot","postMigrate")
+    )
+    if($exitCode -eq 1)
+    {
+        log "Exiting script with critical error on $($functionName)."
+        log "Disabling tasks..."
+        foreach($task in $tasks)
+        {
+            Disable-ScheduledTask -TaskName $task -Verbose
+            log "Disabled $($task) task."
+        }
+        log "Enabling password logon provider..."
+        reg.exe add "HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Authentication\Credential Providers\{60b78e88-ead8-445c-9cfd-0b87f74ea6cd}" /v "Disabled" /t REG_DWORD /d 0 /f | Out-Host
+        log "Enabled logon provider."
+        log "Exiting script... please reboot device."
+        Stop-Transcript
+        exit 1
+    }
+    else
+    {
+        log "Migration script failed.  Review logs at C:\ProgramData\Microsoft\IntuneManagementExtension\Logs"
+        log "Disabling tasks..."
+        foreach($task in $tasks)
+        {
+            Disable-ScheduledTask -TaskName $task -Verbose
+            log "Disabled $($task) task."
+        }
+        log "Exiting script."
+        exit 0
+    }
+}
+
 # FUNCTION: msGraphAuthenticate
 # DESCRIPTION: Authenticates to Microsoft Graph.
 function msGraphAuthenticate()
