@@ -182,7 +182,6 @@ log "Checking for target tenant in JSON settings..."
 if([string]::IsNullOrEmpty($config.targetTenant.tenantName))
 {
     log "Target tenant not found in JSON settings."
-    exitScript -exitCode 4 -functionName "targetTenant"
 }
 else
 {
@@ -203,12 +202,33 @@ else
 }
 
 
-# Check Microsoft account connection registry policy
+<# Check Microsoft account connection registry policy
 log "Checking Microsoft account connection registry policy..."
 $accountConnectionPath = "HKLM:\SOFTWARE\Microsoft\PolicyManager\current\device\Accounts"
 $accountConnectionName = "AllowMicrosoftAccountConnection"
 $accountConnectionValue = Get-ItemPropertyValue -Path $accountConnectionPath -Name $accountConnectionName -ErrorAction SilentlyContinue
 if($accountConnectionValue -ne 1)
+{
+    log "Microsoft account connection registry policy is not set. Setting policy..."
+    Set-ItemProperty -Path $accountConnectionPath -Name $accountConnectionName -Value 1
+    log "Microsoft account connection registry policy set successfully."
+}
+else
+{
+    log "Microsoft account connection registry policy is set."
+}#>
+
+# Check Microsoft account connection registry policy
+log "Checking Microsoft account connection registry policy..."
+$accountConnectionPath = "HKLM:\SOFTWARE\Microsoft\PolicyManager\current\device\Accounts"
+$accountConnectionName = "AllowMicrosoftAccountConnection"
+$accountConnectionValue = Get-ItemProperty -Path $accountConnectionPath -ErrorAction SilentlyContinue | Select-Object -ExpandProperty $accountConnectionName
+
+if(!($accountConnectionValue))
+{
+    New-ItemProperty -Path $accountConnectionPath -Name $accountConnectionValue -Value 1 -Force
+}
+elseif($accountConnectionValue -ne 1)
 {
     log "Microsoft account connection registry policy is not set. Setting policy..."
     Set-ItemProperty -Path $accountConnectionPath -Name $accountConnectionName -Value 1
@@ -417,6 +437,7 @@ if($newUserObject)
         SID = $newUserObject.value.securityIdentifier
     }
 }
+
 {
     # Make sure nuget package is installed
     $installedNuget = Get-PackageProvider -Name NuGet -ListAvailable -ErrorAction SilentlyContinue
