@@ -437,7 +437,7 @@ if($newUserObject)
         SID = $newUserObject.value.securityIdentifier
     }
 }
-
+else
 {
     # Make sure nuget package is installed
     $installedNuget = Get-PackageProvider -Name NuGet -ListAvailable -ErrorAction SilentlyContinue
