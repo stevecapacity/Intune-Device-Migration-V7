@@ -4,7 +4,7 @@
 ## Added in 7.1
 - Fix for unjoining domain
 - Fix for finding users in new tenant
-- Option to add wallpaper during migration
+- Option to add wallpaper during migration (IF YOU DONT WANT TO ADD YOUR OWN WALLPAPER, THEN REMOVE THE DEFAULT AUTOPILOT.JPG)
 
 The Intune Device Migration solution allows devices to be off-boarded from their existing tenant and automatically joined to their destination in a matter of minutes; all while retaining user data.
 
