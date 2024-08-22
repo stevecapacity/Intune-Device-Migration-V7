@@ -102,7 +102,7 @@ if($wallpaper)
     Mkdir "C:\Windows\Resources\OEM Themes" -Force | Out-Null
     Copy-Item "$localPath\Autopilot.theme" "C:\Windows\Resources\OEM Themes\Autopilot.theme" -Force
     Mkdir "C:\Windows\web\wallpaper\Autopilot" -Force | Out-Null
-    Copy-Item "$localPath\Autopilot.jpg" "C:\Windows\web\wallpaper\Autopilot\Autopilot.jpg" -Force
+    Copy-Item "$wallpaper" "C:\Windows\web\wallpaper\Autopilot\Autopilot.jpg" -Force
     Log "Setting Autopilot theme as the new user default"
     reg.exe add "HKLM\TempUser\SOFTWARE\Microsoft\Windows\CurrentVersion\Themes" /v InstallTheme /t REG_EXPAND_SZ /d "%SystemRoot%\resources\OEM Themes\Autopilot.theme" /f | Out-Host
     
