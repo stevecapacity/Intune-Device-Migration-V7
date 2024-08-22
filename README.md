@@ -1,4 +1,10 @@
 # Intune Device Migration | V7
+# 7.1 PREVIEW
+
+## Added in 7.1
+- Fix for unjoining domain
+- Fix for finding users in new tenant
+- Option to add wallpaper during migration
 
 The Intune Device Migration solution allows devices to be off-boarded from their existing tenant and automatically joined to their destination in a matter of minutes; all while retaining user data.
 
