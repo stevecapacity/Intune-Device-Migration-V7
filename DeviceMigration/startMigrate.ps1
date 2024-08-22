@@ -201,23 +201,6 @@ else
     }
 }
 
-
-<# Check Microsoft account connection registry policy
-log "Checking Microsoft account connection registry policy..."
-$accountConnectionPath = "HKLM:\SOFTWARE\Microsoft\PolicyManager\current\device\Accounts"
-$accountConnectionName = "AllowMicrosoftAccountConnection"
-$accountConnectionValue = Get-ItemPropertyValue -Path $accountConnectionPath -Name $accountConnectionName -ErrorAction SilentlyContinue
-if($accountConnectionValue -ne 1)
-{
-    log "Microsoft account connection registry policy is not set. Setting policy..."
-    Set-ItemProperty -Path $accountConnectionPath -Name $accountConnectionName -Value 1
-    log "Microsoft account connection registry policy set successfully."
-}
-else
-{
-    log "Microsoft account connection registry policy is set."
-}#>
-
 # Check Microsoft account connection registry policy
 log "Checking Microsoft account connection registry policy..."
 $accountConnectionPath = "HKLM:\SOFTWARE\Microsoft\PolicyManager\current\device\Accounts"
@@ -226,17 +209,18 @@ $accountConnectionValue = Get-ItemProperty -Path $accountConnectionPath -ErrorAc
 
 if(!($accountConnectionValue))
 {
-    New-ItemProperty -Path $accountConnectionPath -Name $accountConnectionValue -Value 1 -Force
+    New-ItemProperty -Path $accountConnectionPath -Name $accountConnectionName -Value 1 -Force
+    log "Microsoft account connection registry value was not present - added 'AllowMicrosoftAccountConnection' with DWORD = 1."
 }
 elseif($accountConnectionValue -ne 1)
 {
-    log "Microsoft account connection registry policy is not set. Setting policy..."
+    log "Microsoft account connection registry value currently set to $($accountConnectionValue). Changing to 1..."
     Set-ItemProperty -Path $accountConnectionPath -Name $accountConnectionName -Value 1
-    log "Microsoft account connection registry policy set successfully."
+    log "Microsoft account connection value updated to 1."
 }
 else
 {
-    log "Microsoft account connection registry policy is set."
+    log "Microsoft account connection registry value is already set to 1."
 }
 
 # FUNCTION: deviceObject
@@ -272,11 +256,11 @@ if($cert)
             $autopilotId = $autopilotObject.value.id
             if([string]::IsNullOrEmpty($groupTag))
             {
-                $groupTag = $autopilotObject.value.groupTag
+                $groupTag = $null
             }
             else
             {
-                $groupTag = $groupTag
+                $groupTag = $autopilotObject.value.groupTag
             }
         }
     }
@@ -291,15 +275,9 @@ else
     $intuneId = $null
     $entraDeviceId = $null
     $autopilotId = $null
-}
-if([string]::IsNullOrEmpty($groupTag))
-{
     $groupTag = $null
 }
-else
-{
-    $groupTag = $groupTag
-}
+
 if($domainjoined -eq "YES")
 {
     $localDomain = Get-ItemPropertyValue -Path "HKLM:\SYSTEM\CurrentControlSet\Services\Tcpip\Parameters" -Name "Domain"
@@ -329,10 +307,10 @@ foreach($x in $pc.Keys)
     # Check if value is null or empty
     if(![string]::IsNullOrEmpty($pcValue))
     {
-        log "Writing $($pcName) with value $($pcValue)."
+        log "Writing $($pcName) with value $($pcValue)..."
         try
         {
-            reg.exe add $regPath /v $pcName /t REG_SZ /d $pcValue /f | Out-Host
+            reg.exe add $regPath /v $pcName /t REG_SZ /d $pcValue /f | Out-Null
             log "Successfully wrote $($pcName) with value $($pcValue)."
         }
         catch
@@ -358,24 +336,38 @@ foreach($x in $pc.Keys)
 [string]$SAMName = ($userName).Split("\")[1]
     
 # If PC is NOT domain joined, get UPN from cache
+log "Attempting to get current user's UPN..."
 if($domainJoined -eq "NO")
 {
-    $upn = (Get-ItemPropertyValue -Path "HKLM:\SOFTWARE\Microsoft\IdentityStore\Cache\$($SID)\IdentityCache\$($SID)" -Name "UserName")
     # If PC is Azure AD joined, get user ID from Graph
     if($azureAdJoined -eq "YES")
     {
+        $upn = (Get-ItemPropertyValue -Path "HKLM:\SOFTWARE\Microsoft\IdentityStore\Cache\$($SID)\IdentityCache\$($SID)" -Name "UserName")
+        log "System is Entra ID Joined - detected IdentityCache UPN value: $upn. Querying graph..."
         $entraUserId = (Invoke-RestMethod -Method Get -Uri "https://graph.microsoft.com/beta/users/$($upn)" -Headers $headers).id
+        if($entraUserId)
+        {
+            log "Successfully obtained Entra User ID: $entraUserId."
+        }
+        else
+        {
+            log "Could not obtain Entra User ID from UPN value: $upn."
+        }
     }
     else
     {
+        log "System is not domain or Entra joined - setting UPN and Entra User ID values to Null."
+        $upn = $null
         $entraUserId = $null
     }
 }
 else
 {
+    log "System is domain joined - setting UPN and Entra User ID values to Null."
     $upn = $null
     $entraUserId = $null
 }
+
 $currentUser = @{
     userName = $userName
     upn = $upn
@@ -392,10 +384,10 @@ foreach($x in $currentUser.Keys)
     # Check if value is null or empty
     if(![string]::IsNullOrEmpty($currentUserValue))
     {
-        log "Writing $($currentUserName) with value $($currentUserValue)."
+        log "Writing $($currentUserName) with value $($currentUserValue)..."
         try
         {
-            reg.exe add $regPath /v $currentUserName /t REG_SZ /d $currentUserValue /f | Out-Host
+            reg.exe add $regPath /v $currentUserName /t REG_SZ /d $currentUserValue /f | Out-Null
             log "Successfully wrote $($currentUserName) with value $($currentUserValue)."
         }
         catch
@@ -406,15 +398,6 @@ foreach($x in $currentUser.Keys)
     }
 }
 
-# Attempt to get new user info based on current SAMName
-if($pc.domainJoined -eq "YES")
-{
-    $currentUPN = $currentUser.SAMName
-}
-else
-{
-    $currentUPN = ($currentUser.upn).Split("@")[0]
-}
 # If target tenant headers exist, get new user object
 $newHeaders = ""
 if($targetHeaders)
@@ -425,7 +408,7 @@ else
 {
     $newHeaders = $sourceHeaders
 }
-$newUserObject = Invoke-RestMethod -Method GET -Uri "https://graph.microsoft.com/beta/users?`$filter=startsWith(userPrincipalName,'$currentUPN')" -Headers $newHeaders
+$newUserObject = Invoke-RestMethod -Method GET -Uri "https://graph.microsoft.com/beta/users?`$filter=startsWith(userPrincipalName,'$samName')" -Headers $newHeaders
 # if new user graph request is successful, set new user object
 if($newUserObject)
 {
@@ -436,104 +419,56 @@ if($newUserObject)
         SAMName = $newUserObject.value.userPrincipalName.Split("@")[0]
         SID = $newUserObject.value.securityIdentifier
     }
+    # Write new user object to registry
+    foreach($x in $newUser.Keys)
+    {
+        $newUserName = "NEW_$($x)"
+        $newUserValue = $($newUser[$x])
+        if(![string]::IsNullOrEmpty($newUserValue))
+        {
+            log "Writing $($newUserName) with value $($newUserValue)..."
+            try
+            {
+                reg.exe add $config.regPath /v $newUserName /t REG_SZ /d $newUserValue /f | Out-Null
+                log "Successfully wrote $($newUserName) with value $($newUserValue)."
+            }
+            catch
+            {
+                $message = $_.Exception.Message
+                log "Failed to write $($newUserName) with value $($newUserValue).  Error: $($message)."
+            }
+        }
+    }
 }
 else
 {
-    # Make sure nuget package is installed
-    $installedNuget = Get-PackageProvider -Name NuGet -ListAvailable -ErrorAction SilentlyContinue
-    if(-not($installedNuget))
+    log "New user not found in $($config.targetTenant.tenantName) tenant.  Prompting user to sign in..."
+    schtasks.exe /create /tn "userFinder" /xml "C:\ProgramData\IntuneMigration\userFinder.xml" /f | Out-Host
+    $limit = (Get-Date).AddMinutes(10)
+    do 
     {
-        log "NuGet package provider not installed.  Installing..."
-        Install-PackageProvider -Name NuGet -Force
-        log "NuGet package provider installed successfully."
-    }
-    else
-    {
-        log "NuGet package provider already installed."
-    }
-    # Check for Az.Accounts module
-    $installedAzAccounts = Get-Module -Name Az.Accounts -ErrorAction SilentlyContinue
-    if(-not($installedAzAccounts))
-    {
-        log "Az.Accounts module not installed.  Installing..."
-        Install-Module -Name Az.Accounts -Force
-        Import-Module Az.Accounts
-        log "Az.Accounts module installed successfully."
-    }
-    else
-    {
-        log "Az.Accounts module already installed."
-        Import-Module Az.Accounts
-    }
-    try
-    {
-        Connect-AzAccount
-        $token = Get-AzAccessToken -ResourceUrl "https://graph.microsoft.com/"
-        #Get Token form OAuth
-        $token = -join("Bearer ", $token.Token)
-
-        #Reinstantiate headers
-        $headers = New-Object "System.Collections.Generic.Dictionary[[String],[String]]"
-        $headers.Add("Authorization", $token)
-        $headers.Add("Content-Type", "application/json")
-
-        $output = Invoke-RestMethod -Uri "https://graph.microsoft.com/beta/me" -Headers $headers -Method "GET"
-
-        if(![bool] $output.psobject.Properties['userPrincipalName'])
-        {
-            Log "New user not found in $($config.targetTenant.tenantName) tenant."
+        $valueExists = (Get-ItemProperty -Path "HKLM:\SOFTWARE\IntuneMigration" -ErrorAction Ignore).new_UPN
+        if ($null -eq $valueExists) {
+            Write-Host "Registry value not found. Sleeping for 7 seconds..."
+            Start-Sleep -Seconds 7
         }
-        else
-        {
-            $newUserObject = Invoke-WebRequest -Method GET -Uri "https://graph.microsoft.com/beta/users/$($output.userPrincipalName)" -Headers $targetHeaders
-            if($newUserObject.StatusCode -eq 200)
-            {
-                log "New user found in $($config.targetTenant.tenantName) tenant."
-                $newUser = @{
-                    upn = $newUserObject.userPrincipalName
-                    entraUserId = $newUserObject.id
-                    SAMName = $newUserObject.userPrincipalName.Split("@")[0]
-                    SID = $newUserObject.securityIdentifier
-                }
-            }
-            else
-            {
-                log "New user not found in $($config.targetTenant.tenantName) tenant."
-            }
-        }
-    }
-    catch
-    {
-        $message = $_.Exception.Message
-        log "Failed to get new user object. Error: $message"
-        log "Exiting script."
-        exitScript -exitCode 4 -functionName "newUserObject"
-    }
+    
+    } while ($null -eq $valueExists -or (Get-Date) -lt $limit)
+    
+    Write-Host "User found. Continuing with script..."
+    Disable-ScheduledTask -TaskName "userFinder"
 }       
 
-# Write new user object to registry
-foreach($x in $newUser.Keys)
+$checkpoint = (Get-ItemProperty -Path "HKLM:\SOFTWARE\IntuneMigration" -ErrorAction Ignore).new_UPN
+if($null -ne $checkpoint)
 {
-    $newUserName = "NEW_$($x)"
-    $newUserValue = $($newUser[$x])
-    if(![string]::IsNullOrEmpty($newUserValue))
-    {
-        log "Writing $($newUserName) with value $($newUserValue)."
-        try
-        {
-            reg.exe add $config.regPath /v $newUserName /t REG_SZ /d $newUserValue /f | Out-Host
-            log "Successfully wrote $($newUserName) with value $($newUserValue)."
-        }
-        catch
-        {
-            $message = $_.Exception.Message
-            log "Failed to write $($newUserName) with value $($newUserValue).  Error: $($message)."
-        }
-    }
+    log "User found.  Continuing with migration..."
 }
-
-
-
+else
+{
+    log "User not found.  Exiting script."
+    exitScript -exitCode 4 -functionName "userFinder"
+}
 
 # Remove MDM certificate if present
 if($pc.mdm -eq $true)
@@ -691,9 +626,12 @@ if($pc.domainJoined -eq "YES")
     }
     try
     {
-        $cred = New-Object -TypeName System.Management.Automation.PSCredential -ArgumentList ("$hostname\$migrateAdmin", $adminPW)
-        log "Unjoining $hostname from domain..."
-        Remove-Computer -UnjoinDomainCredential $cred -PassThru -Force -Verbose
+        $instance = Get-CimInstance -ClassName 'Win32_ComputerSystem'
+        $invCimParams = @{
+            MethodName = 'UnjoinDomainOrWorkGroup'
+            Arguments = @{ FUnjoinOptions=0;Username="$hostname\$migrateAdmin";Password="$adminPW" }
+        }
+        $instance | Invoke-CimMethod @invCimParams
         log "Successfully unjoined $hostname from domain."
     }
     catch
@@ -959,4 +897,3 @@ log "Lock screen caption set successfully."
 log "$($pc.hostname) will reboot in 30 seconds..."
 Stop-Transcript
 shutdown -r -t 30
-

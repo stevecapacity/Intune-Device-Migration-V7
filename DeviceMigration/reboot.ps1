@@ -92,6 +92,23 @@ log "Reboot task disabled"
 Set-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon" -Name "AutoAdminLogon" -Value 0 -Verbose
 log "Auto logon enabled."
 
+# set new wallpaper
+$wallpaper = (Get-ChildItem -Path $config.localPath -Filter "*.jpg" -Recurse).FullName
+if($wallpaper)
+{
+    reg.exe load HKLM\TempUser "C:\Users\Default\NTUSER.DAT" | Out-Host
+
+    Log "Setting up Autopilot theme"
+    Mkdir "C:\Windows\Resources\OEM Themes" -Force | Out-Null
+    Copy-Item "$localPath\Autopilot.theme" "C:\Windows\Resources\OEM Themes\Autopilot.theme" -Force
+    Mkdir "C:\Windows\web\wallpaper\Autopilot" -Force | Out-Null
+    Copy-Item "$localPath\Autopilot.jpg" "C:\Windows\web\wallpaper\Autopilot\Autopilot.jpg" -Force
+    Log "Setting Autopilot theme as the new user default"
+    reg.exe add "HKLM\TempUser\SOFTWARE\Microsoft\Windows\CurrentVersion\Themes" /v InstallTheme /t REG_EXPAND_SZ /d "%SystemRoot%\resources\OEM Themes\Autopilot.theme" /f | Out-Host
+    
+    reg.exe unload HKLM\TempUser | Out-Host
+}
+
 # Retrieve variables from registry
 log "Retrieving variables from registry..."
 $regKey = "Registry::$($config.regPath)"

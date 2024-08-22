@@ -180,7 +180,22 @@ catch
 }
 
 # updateGroupTag
-$groupTag = (Get-ItemProperty -Path "HKLM:\SOFTWARE\IntuneMigration" -Name "OLD_groupTag").OLD_groupTag
+$tag1 = (Get-ItemProperty -Path "HKLM:\SOFTWARE\IntuneMigration" -Name "OLD_groupTag").OLD_groupTag
+$tag2 = $config.groupTag
+
+if([string]::IsNullOrEmpty($tag1))
+{
+    $groupTag = $tag2
+}
+elseif([string]::IsNullOrEmpty($tag2)) {
+    $groupTag = $tag1
+}
+else
+{
+    $groupTag = $null
+    log "Group tag not found"
+}
+
 if(![string]::IsNullOrEmpty($groupTag))
 {
     log "Updating group tag to $($groupTag)..."
