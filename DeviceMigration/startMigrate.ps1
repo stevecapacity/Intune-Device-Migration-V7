@@ -45,10 +45,18 @@ function exitScript()
     {
         log "Exiting script with critical error on $($functionName)."
         log "Disabling tasks..."
-        foreach($task in $tasks)
+        foreach($x in $tasks)
         {
-            Disable-ScheduledTask -TaskName $task -Verbose
-            log "Disabled $($task) task."
+            $task = Get-ScheduledTask -TaskName $x -ErrorAction SilentlyContinue
+            if($task)
+            {
+                Disable-ScheduledTask -TaskName $x -Verbose
+                log "Disabled $($x) task."
+            }
+            else
+            {
+                log "$($x) task not found."
+            }
         }
         log "Enabling password logon provider..."
         reg.exe add "HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Authentication\Credential Providers\{60b78e88-ead8-445c-9cfd-0b87f74ea6cd}" /v "Disabled" /t REG_DWORD /d 0 /f | Out-Host
@@ -61,10 +69,18 @@ function exitScript()
     {
         log "Migration script failed.  Review logs at C:\ProgramData\Microsoft\IntuneManagementExtension\Logs"
         log "Disabling tasks..."
-        foreach($task in $tasks)
+        foreach($x in $tasks)
         {
-            Disable-ScheduledTask -TaskName $task -Verbose
-            log "Disabled $($task) task."
+            $task = Get-ScheduledTask -TaskName $x -ErrorAction SilentlyContinue
+            if($task)
+            {
+                Disable-ScheduledTask -TaskName $x -Verbose
+                log "Disabled $($x) task."
+            }
+            else
+            {
+                log "$($x) task not found."
+            }
         }
         log "Exiting script."
         exit 0
@@ -402,17 +418,21 @@ foreach($x in $currentUser.Keys)
 $newHeaders = ""
 if($targetHeaders)
 {
+    $tenant = $config.targetTenant.tenantName
+    log "Target tenant headers found.  Getting new user object from $tenant tenant..."
     $newHeaders = $targetHeaders
 }
 else
 {
+    $tenant = $config.sourceTenant.tenantName
+    log "Target tenant headers not found.  Getting new user object from $tenant tenant..."
     $newHeaders = $sourceHeaders
 }
 $newUserObject = Invoke-RestMethod -Method GET -Uri "https://graph.microsoft.com/beta/users?`$filter=startsWith(userPrincipalName,'$samName')" -Headers $newHeaders
 # if new user graph request is successful, set new user object
-if($newUserObject)
+if($newUserObject.value -ne $null)
 {
-    log "New user found in $($config.targetTenant.tenantName) tenant."
+    log "New user found in $tenant tenant."
     $newUser = @{
         upn = $newUserObject.value.userPrincipalName
         entraUserId = $newUserObject.value.id
@@ -443,32 +463,69 @@ if($newUserObject)
 else
 {
     log "New user not found in $($config.targetTenant.tenantName) tenant.  Prompting user to sign in..."
-    schtasks.exe /create /tn "userFinder" /xml "C:\ProgramData\IntuneMigration\userFinder.xml" /f | Out-Host
-    $limit = (Get-Date).AddMinutes(10)
-    do 
+    
+    $installedNuget = Get-PackageProvider -Name NuGet -ListAvailable -ErrorAction SilentlyContinue
+    if(-not($installedNuget))
     {
-        $valueExists = (Get-ItemProperty -Path "HKLM:\SOFTWARE\IntuneMigration" -ErrorAction Ignore).new_UPN
-        if ($null -eq $valueExists) {
-            Write-Host "Registry value not found. Sleeping for 7 seconds..."
-            Start-Sleep -Seconds 7
+        log "NuGet package provider not installed.  Installing..."
+        Install-PackageProvider -Name NuGet -Force
+        log "NuGet package provider installed successfully."
+    }
+    else
+    {
+        log "NuGet package provider already installed."
+    }
+    # Check for Az.Accounts module
+    $installedAzAccounts = Get-InstalledModule -Name Az.Accounts -ErrorAction SilentlyContinue
+    if(-not($installedAzAccounts))
+    {
+        log "Az.Accounts module not installed.  Installing..."
+        Install-Module -Name Az.Accounts -Force
+        log "Az.Accounts module installed successfully."
+    }
+    else
+    {
+        log "Az.Accounts module already installed."
+    }
+    schtasks.exe /create /tn "userFinder" /xml "C:\ProgramData\IntuneMigration\userFinder.xml" /f | Out-Host
+    $newUserPath = "C:\Users\Public\Documents\newUserInfo.json"
+    do 
+    {        
+        Write-Host "New user info not found. Sleeping for 7 seconds..."
+        Start-Sleep -Seconds 7
+    } while (!(Test-Path $newUserPath))
+    
+    $newUserInfo = Get-Content -Path "C:\Users\Public\Documents\newUserInfo.json" | ConvertFrom-JSON
+
+    $newUser = @{
+        entraUserID = $newUserInfo.entraUserId
+        SID = $newUserInfo.SID
+        SAMName = $newUserInfo.SAMName
+        UPN = $newUserInfo.upn
+    }
+
+    foreach($x in $newUser.Keys)
+    {
+        $newUserName = "NEW_$($x)"
+        $newUserValue = $($newUser[$x])
+        if(![string]::IsNullOrEmpty($newUserValue))
+        {
+            log "Writing $($newUserName) with value $($newUserValue)..."
+            try
+            {
+                reg.exe add "HKLM\SOFTWARE\IntuneMigration" /v $newUserName /t REG_SZ /d $newUserValue /f | Out-Null
+                log "Successfully wrote $($newUserName) with value $($newUserValue)."
+            }
+            catch
+            {
+                $message = $_.Exception.Message
+                log "Failed to write $($newUserName) with value $($newUserValue).  Error: $($message)."
+            }
         }
-    
-    } while ($null -eq $valueExists -or (Get-Date) -lt $limit)
-    
+    }
     Write-Host "User found. Continuing with script..."
     Disable-ScheduledTask -TaskName "userFinder"
 }       
-
-$checkpoint = (Get-ItemProperty -Path "HKLM:\SOFTWARE\IntuneMigration" -ErrorAction Ignore).new_UPN
-if($null -ne $checkpoint)
-{
-    log "User found.  Continuing with migration..."
-}
-else
-{
-    log "User not found.  Exiting script."
-    exitScript -exitCode 4 -functionName "userFinder"
-}
 
 # Remove MDM certificate if present
 if($pc.mdm -eq $true)

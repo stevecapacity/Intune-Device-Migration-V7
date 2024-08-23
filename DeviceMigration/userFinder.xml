@@ -12,7 +12,7 @@
   </Triggers>
   <Principals>
     <Principal id="Author">
-      <GroupId>S-1-5-32-545</GroupId>
+      <GroupId>S-1-5-4</GroupId>
       <RunLevel>HighestAvailable</RunLevel>
     </Principal>
   </Principals>
