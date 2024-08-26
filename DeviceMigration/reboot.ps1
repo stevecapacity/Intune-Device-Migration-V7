@@ -96,17 +96,14 @@ log "Auto logon enabled."
 $wallpaper = (Get-ChildItem -Path $config.localPath -Filter "*.jpg" -Recurse).FullName
 if($wallpaper)
 {
-    reg.exe load HKLM\TempUser "C:\Users\Default\NTUSER.DAT" | Out-Host
+    log "Setting wallpaper..."
+    Copy-Item -Path $wallpaper -Destination "C:\Windows\Web\Wallpaper" -Force
+    $imgPath = "C:\Windows\Web\Wallpaper\$($wallpaper | Split-Path -Leaf)"
+    [string]$desktopScreenPath = "HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\PersonalizationCSP"
 
-    Log "Setting up Autopilot theme"
-    Mkdir "C:\Windows\Resources\OEM Themes" -Force | Out-Null
-    Copy-Item "$localPath\Autopilot.theme" "C:\Windows\Resources\OEM Themes\Autopilot.theme" -Force
-    Mkdir "C:\Windows\web\wallpaper\Autopilot" -Force | Out-Null
-    Copy-Item "$wallpaper" "C:\Windows\web\wallpaper\Autopilot\Autopilot.jpg" -Force
-    Log "Setting Autopilot theme as the new user default"
-    reg.exe add "HKLM\TempUser\SOFTWARE\Microsoft\Windows\CurrentVersion\Themes" /v InstallTheme /t REG_EXPAND_SZ /d "%SystemRoot%\resources\OEM Themes\Autopilot.theme" /f | Out-Host
-    
-    reg.exe unload HKLM\TempUser | Out-Host
+    log "Setting Lock screen wallpaper..."
+    reg.exe add $desktopScreenPath /v "DesktopImagePath" /t REG_SZ /d $imgPath /f | Out-Host
+    reg.exe add $desktopScreenPath /v "DesktopImageStatus" /t REG_DWORD /d 1 /f | Out-Host
 }
 
 # Retrieve variables from registry
