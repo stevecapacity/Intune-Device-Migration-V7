@@ -272,11 +272,13 @@ if($cert)
             $autopilotId = $autopilotObject.value.id
             if([string]::IsNullOrEmpty($groupTag))
             {
-                $groupTag = $null
+                $groupTag = $autopilotObject.value.groupTag
+                log "Group tag found: $($groupTag)."
             }
             else
             {
-                $groupTag = $autopilotObject.value.groupTag
+                $groupTag = $null
+                log "Group tag not found."
             }
         }
     }
@@ -428,7 +430,8 @@ else
     log "Target tenant headers not found.  Getting new user object from $tenant tenant..."
     $newHeaders = $sourceHeaders
 }
-$newUserObject = Invoke-RestMethod -Method GET -Uri "https://graph.microsoft.com/beta/users?`$filter=startsWith(userPrincipalName,'$samName')" -Headers $newHeaders
+$userLookup = $($currentUser.upn)
+$newUserObject = Invoke-RestMethod -Method GET -Uri "https://graph.microsoft.com/beta/users?`$filter=startsWith(userPrincipalName,'$userLookup')" -Headers $newHeaders
 # if new user graph request is successful, set new user object
 if($newUserObject.value -ne $null)
 {
