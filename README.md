@@ -1,6 +1,9 @@
 # Intune Device Migration | V7
-# 7.1 PREVIEW
+# 7.2 PREVIEW
 
+## Added in 7.2
+- Added timeout for user sign in loop
+  
 ## Added in 7.1
 - Fix for unjoining domain
 - Fix for finding users in new tenant
