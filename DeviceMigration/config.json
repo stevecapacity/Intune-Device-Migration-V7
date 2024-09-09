@@ -14,5 +14,6 @@
     },
     "groupTag":"<groupTag>",
     "bitlocker":"<migrate/decrypt>",
-    "SCCM":false
+    "SCCM":false,
+    "networkBeta":false
 }

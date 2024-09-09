@@ -87,6 +87,86 @@ function exitScript()
     }
 }
 
+# Export WLAN profiles function
+function Export-WLANProfiles
+{
+    $wlanProfiles = netsh wlan show profiles | Select-String "All User Profile" | ForEach-Object { ($_ -split ":")[1].Trim() }
+    foreach($profile in $wlanProfiles)
+    {
+        $profilePath = "$localPath\WLAN_$profile.xml"
+        netsh wlan export profile name=$profile folder=$localPath key=clear
+        Rename-Item -Path "$localPath\$profile.xml" -NewName $profilePath -Force
+        log "Exported WLAN profile $profile"    
+    }
+}
+
+# Export LAN profiles function
+function Export-LANProfiles
+{
+    $lanAdapters = Get-NetAdapter | Where-Object { $_.MediaType -eq "802.3" }
+    foreach($adapter in $lanAdapters)
+    {
+        $name = $adapter.Name
+        $path = "$localPath\LAN_$name.xml"
+        $config = Get-NetAdapter -Name $name | Select-Object *
+        $ipConfig = Get-NetIPConfiguration -InterfaceAlias $name
+
+        $configData = @{
+            AdapterConfig = $config
+            IPConfig = $ipConfig
+        }
+
+        $configData | Export-Clixml -Path $path
+        log "Exported LAN profile $name"
+    }
+}
+
+
+# Import WLAN profiles function
+function Import-WLANProfiles
+{
+    $exportedWLANProfiles = Get-ChildItem "$localPath\WLAN_*.xml"
+
+    foreach($profile in $exportedWLANProfiles)
+    {
+        $name = $profile.BaseName -replace "^WLAN_", ""
+        $currentProfiles = netsh wlan show profiles | Select-String "All User Profile" | ForEach-Object { ($_ -split ":")[1].Trim() }
+
+        if (-not ($currentProfiles -contains $name))
+        {
+            netsh wlan add profile filename=$profile.FullName
+            log "Imported WLAN profile $name"
+        }
+        else
+        {
+            log "WLAN profile $name already exists"
+        }
+    }
+}
+
+# Import LAN profiles function
+function Import-LANProfiles
+{
+    $exportedLANProfiles = Get-ChildItem "$localPath\LAN_*.xml"
+    foreach($profile in $exportedLANProfiles)
+    {
+        $name = $profile.BaseName -replace "^LAN_", ""
+        $config = Import-Clixml -Path $profile.FullName
+        $currentAdapter = Get-NetAdapter -Name $name
+
+        if ($null -eq $currentAdapter)
+        {
+            log "LAN adapter $name not found, skipping..."
+        }
+        else
+        {
+            $ipConfig = $config.IPConfig
+            New-NetIPAddress -InterfaceAlias $name -IPAddress $ipConfig.IPAddress -PrefixLength $ipConfig.PrefixLength -DefaultGateway $ipConfig.DefaultGateway
+            Set-DnsClientServerAddress -InterfaceAlias $name -ServerAddresses $ipConfig.DnsServers
+        }
+    }
+}
+
 # FUNCTION: generatePassword
 # DESCRIPTION: Generates a random password.
 # PARAMETERS: $length - The length of the password to generate.
@@ -166,6 +246,14 @@ $destination = $config.localPath
 log "Copying package files to $($destination)..."
 Copy-Item -Path ".\*" -Destination $destination -Recurse -Force
 log "Package files copied successfully."
+
+if($config.networkBeta -eq $true)
+{
+    log "Network Beta is enabled.  Exporting WLAN and LAN profiles..."
+    Export-WLANProfiles
+    Export-LANProfiles
+    log "WLAN and LAN profiles exported successfully."
+}
 
 # Authenticate to source tenant if exists
 log "Checking for source tenant in JSON settings..."
@@ -939,11 +1027,19 @@ else
 {
     log "PC is not MDM enrolled."
 }
+
+# Import network profiles
+if($config.networkBeta -eq $true)
+{
+    log "Network Beta is enabled.  Importing WLAN and LAN profiles..."
+    Import-WLANProfiles
+    Import-LANProfiles
+    log "WLAN and LAN profiles imported successfully."
+}
+
 # FUNCTION: setAutoLogonAdmin
 # DESCRIPTION: Sets the auto logon account for the administrator 
 # PARAMETERS: $username - The username to set auto logon for, $password - The password to set auto logon for.
-
-    
 [string]$autoLogonPath = "HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon"
 log "Creating local admin account..."
 log "Successfully created local admin account."
