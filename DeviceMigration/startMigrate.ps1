@@ -919,8 +919,6 @@ else
 # DESCRIPTION: Sets the auto logon account for the administrator 
 # PARAMETERS: $username - The username to set auto logon for, $password - The password to set auto logon for.
 [string]$autoLogonPath = "HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon"
-log "Creating local admin account..."
-log "Successfully created local admin account."
 reg.exe add $autoLogonPath /v "AutoAdminLogon" /t REG_SZ /d 0 /f | Out-Host
 reg.exe add $autoLogonPath /v "DefaultUserName" /t REG_SZ /d $migrateAdmin /f | Out-Host
 reg.exe add $autoLogonPath /v "DefaultPassword" /t REG_SZ /d "@Password*123" | Out-Host
