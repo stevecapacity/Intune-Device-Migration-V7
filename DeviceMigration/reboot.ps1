@@ -26,39 +26,6 @@ function log()
     Write-Output "$timestamp - $message"
 }
 
-# FUNCTION: exitScript
-# DESCRIPTION: Exits the script with error code and takes action depending on the error code.
-function exitScript()
-{
-    [Cmdletbinding()]
-    Param(
-        [Parameter(Mandatory=$true)]
-        [int]$exitCode,
-        [Parameter(Mandatory=$true)]
-        [string]$functionName,
-        [array]$tasks = @("reboot","postMigrate")
-    )
-    if($exitCode -eq 1)
-    {
-        log "Exiting script with critical error on $($functionName)."
-        log "Disabling tasks..."
-        foreach($task in $tasks)
-        {
-            Disable-ScheduledTask -TaskName $task -Verbose
-            log "Disabled $($task) task."
-        }
-        log "Enabling password logon provider..."
-        reg.exe add "HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Authentication\Credential Providers\{60b78e88-ead8-445c-9cfd-0b87f74ea6cd}" /v "Disabled" /t REG_DWORD /d 0 /f | Out-Host
-        log "Enabled logon provider."
-        log "Rebooting device..."
-        Stop-Transcript
-        shutdown -r -t 30
-    }
-    else
-    {
-        log "Migration script failed.  Review logs at C:\ProgramData\Microsoft\IntuneManagementExtension\Logs"
-    }
-}
 
 # Import config settings from JSON file
 $config = Get-Content "C:\ProgramData\IntuneMigration\config.json" | ConvertFrom-Json
@@ -121,7 +88,7 @@ $values.PSObject.Properties | ForEach-Object {
     else
     {
         log "Error retrieving $name"
-        exitScript -exitCode 1 -functionName "retrieveVariables"
+        ex
     }
 }
 
@@ -257,7 +224,7 @@ catch
     $message = $_.Exception.Message
     log "Failed to run cleanupLogonCache: $message"
     log "Exiting script..."
-    exitScript -exitCode 1 -functionName "cleanupLogonCache"
+    exit 1
 }
 
 # cleanup identity store cache
@@ -321,7 +288,7 @@ if($OLD_domainJoined -eq "NO")
         $message = $_.Exception.Message
         log "Failed to run cleanupIdentityStore: $message"
         log "Exiting script..."
-        exitScript -exitCode 1 -functionName "cleanupIdentityStore"
+        ex
     }
 }
 else
@@ -457,7 +424,7 @@ catch
     $message = $_.Exception.Message
     log "Failed to run updateSamNameLogonCache: $message"
     log "Exiting script..."
-    exitScript -exitCode 1 -functionName "updateSamNameLogonCache"
+    exit 1
 }
 
 # update samname in identityStore Cache (this is required when displaynames are the same in both tenants, and new samname gets random characters added at the end)
@@ -530,7 +497,7 @@ if($OLD_domainJoined -eq "NO")
         $message = $_.Exception.Message
         log "Failed to run updateSamNameIdentityStore: $message"
         log "Exiting script..."
-        exitScript -exitCode 1 -functionName "updateSamNameIdentityStore"
+        ex
     }
 }
 else

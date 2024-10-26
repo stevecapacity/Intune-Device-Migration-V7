@@ -29,64 +29,6 @@ function log()
     Write-Output "$timestamp - $message"
 }
 
-# FUNCTION: exitScript
-# DESCRIPTION: Exits the script with error code and takes action depending on the error code.
-function exitScript()
-{
-    [Cmdletbinding()]
-    Param(
-        [Parameter(Mandatory=$true)]
-        [int]$exitCode,
-        [Parameter(Mandatory=$true)]
-        [string]$functionName,
-        [array]$tasks = @("reboot","postMigrate")
-    )
-    if($exitCode -eq 1)
-    {
-        log "Exiting script with critical error on $($functionName)."
-        log "Disabling tasks..."
-        foreach($x in $tasks)
-        {
-            $task = Get-ScheduledTask -TaskName $x -ErrorAction SilentlyContinue
-            if($task)
-            {
-                Disable-ScheduledTask -TaskName $x -Verbose
-                log "Disabled $($x) task."
-            }
-            else
-            {
-                log "$($x) task not found."
-            }
-        }
-        log "Enabling password logon provider..."
-        reg.exe add "HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Authentication\Credential Providers\{60b78e88-ead8-445c-9cfd-0b87f74ea6cd}" /v "Disabled" /t REG_DWORD /d 0 /f | Out-Host
-        log "Enabled logon provider."
-        log "Exiting script... please reboot device."
-        Stop-Transcript
-        exit 1
-    }
-    else
-    {
-        log "Migration script failed.  Review logs at C:\ProgramData\Microsoft\IntuneManagementExtension\Logs"
-        log "Disabling tasks..."
-        foreach($x in $tasks)
-        {
-            $task = Get-ScheduledTask -TaskName $x -ErrorAction SilentlyContinue
-            if($task)
-            {
-                Disable-ScheduledTask -TaskName $x -Verbose
-                log "Disabled $($x) task."
-            }
-            else
-            {
-                log "$($x) task not found."
-            }
-        }
-        log "Exiting script."
-        exit 0
-    }
-}
-
 # FUNCTION: generatePassword
 # DESCRIPTION: Generates a random password.
 # PARAMETERS: $length - The length of the password to generate.
@@ -172,7 +114,7 @@ log "Checking for source tenant in JSON settings..."
 if([string]::IsNullOrEmpty($config.sourceTenant.tenantName))
 {
     log "Source tenant not found in JSON settings."
-    exitScript -exitCode 4 -functionName "sourceTenant"
+    exit 1
 }
 else
 {
@@ -188,7 +130,7 @@ else
         $message = $_.Exception.Message
         log "Failed to authenticate to $($config.sourceTenant.tenantName) source tenant. Error: $message"
         log "Exiting script."
-        exitScript -exitCode 4 -functionName "msGraphAuthenticate"
+        exit 1
     }
 }
 
@@ -213,7 +155,7 @@ else
         $message = $_.Exception.Message
         log "Failed to authenticate to $($config.targetTenant.tenantName) target tenant. Error: $message"
         log "Exiting script."
-        exitScript -exitCode 4 -functionName "msGraphAuthenticate"
+        exit 1
     }
 }
 
@@ -484,27 +426,60 @@ else
         log "NuGet package provider already installed."
     }
     # Check for Az.Accounts module
-    $installedAzAccounts = Get-InstalledModule -Name Az.Accounts -ErrorAction SilentlyContinue
-    if(-not($installedAzAccounts))
+    $modules = ("Az.Accounts","RunAsUser")
+    foreach($module in $modules)
     {
-        log "Az.Accounts module not installed.  Installing..."
-        Install-Module -Name Az.Accounts -Force
-        log "Az.Accounts module installed successfully."
+        $installedModule = Get-InstalledModule -Name $module -ErrorAction SilentlyContinue
+        if(-not($installedModule))
+        {
+            log "$module module not installed.  Installing..."
+            Install-Module -Name $module -Force
+            log "$module module installed successfully."
+        }
+        else
+        {
+            log "$module module already installed."
+        }
     }
-    else
-    {
-        log "Az.Accounts module already installed."
+    $scriptBlock = {
+        Import-Module Az.Accounts
+
+        #Get Token form OAuth
+        Clear-AzContext -Force
+        Update-AzConfig -EnableLoginByWam $false -LoginExperienceV2 Off
+        Connect-AzAccount
+        $theToken = Get-AzAccessToken -ResourceUrl "https://graph.microsoft.com/"
+
+        #Get Token form OAuth
+        $token = -join("Bearer ", $theToken.Token)
+
+        #Reinstantiate headers
+        $headers = New-Object "System.Collections.Generic.Dictionary[[String],[String]]"
+        $headers.Add("Authorization", $token)
+        $headers.Add("Content-Type", "application/json")
+
+        $newUserObject = Invoke-RestMethod -Uri "https://graph.microsoft.com/beta/me" -Headers $headers -Method "GET"
+
+        $newUser = @{
+            upn = $newUserObject.userPrincipalName
+            entraUserId = $newUserObject.id
+            SAMName = $newUserObject.userPrincipalName.Split("@")[0]
+            SID = $newUserObject.securityIdentifier
+        } | ConvertTo-JSON
+
+        $newUser | Out-File "C:\Users\Public\Documents\newUserInfo.json"
     }
     $newUserPath = "C:\Users\Public\Documents\newUserInfo.json"
     $timeout = 300
     $checkInterval = 5
     $elapsedTime = 0
-    schtasks.exe /create /tn "userFinder" /xml "C:\ProgramData\IntuneMigration\userFinder.xml" /f | Out-Host
+    Invoke-AsCurrentUser -ScriptBlock $scriptBlock -UseWindowsPowerShell
     while($elapsedTime -lt $timeout)
     {
         if(Test-Path $newUserPath)
         {
             log "New user found.  Continuing with script..."
+            $elapsedTime = $timeout
             break
         }
         else
@@ -550,7 +525,7 @@ else
     else
     {
         log "New user not found.  Exiting script."
-        exitScript -exitCode 4 -functionName "newUser"
+        exit 1
     }
 }       
 
@@ -640,7 +615,7 @@ foreach($task in $tasks)
             $message = $_.Exception.Message
             log "Failed to set $($task) task. Error: $message"
             log "Exiting script."
-            exitScript -exitCode 4 -functionName "schtasks"
+            exit 1
         }
     }
 }
@@ -660,7 +635,7 @@ if($pc.azureAdJoined -eq "YES")
         $message = $_.Exception.Message
         log "Failed to leave Azure AD. Error: $message"
         log "Exiting script."
-        exitScript -exitCode 4 -functionName "dsregcmd"
+        exit 1
     }
 }
 else
@@ -723,7 +698,7 @@ if($pc.domainJoined -eq "YES")
         $message = $_.Exception.Message
         log "Failed to unjoin $hostname from domain. Error: $message"
         log "Exiting script."
-        exitScript -exitCode 4 -functionName "Remove-Computer"
+        exit 1
     }
 }
 else
@@ -857,7 +832,7 @@ if($config.SCCM -eq $true)
         $message = $_.Exception.Message
         log "Failed to remove SCCM client. Error: $message"
         log "Exiting script."
-        exitScript -exitCode 4 -functionName "removeSCCM"
+        exit 1
     }
 }
 else
@@ -880,13 +855,13 @@ if($ppkg)
         $message = $_.Exception.Message
         log "Failed to install provisioning package. Error: $message"
         log "Exiting script."
-        exitScript -exitCode 4 -functionName "Install-ProvisioningPackage"
+        exit 1
     }
 }
 else
 {
     log "Provisioning package not found."
-    exitScript -exitCode 4 -functionName "Install-ProvisioningPackage"
+    exit 1
 }
 
 # Delete Intune and Autopilot object if exist
@@ -910,7 +885,7 @@ if($pc.mdm -eq $true)
             $message = $_.Exception.Message
             log "Failed to delete Intune object. Error: $message"
             log "Exiting script."
-            exitScript -exitCode 4 -functionName "Intune object delete"
+            exit 1
         }
     }
     if([string]::IsNullOrEmpty($pc.autopilotId))
@@ -931,7 +906,7 @@ if($pc.mdm -eq $true)
             $message = $_.Exception.Message
             log "Failed to delete Autopilot object. Error: $message"
             log "Exiting script."
-            exitScript -exitCode 4 -functionName "Autopilot object delete"
+            exit 1
         }
     }
 }
