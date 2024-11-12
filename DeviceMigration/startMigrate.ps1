@@ -949,6 +949,18 @@ reg.exe add "HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System" /v 
 reg.exe add "HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System" /v "legalnoticetext" /t REG_SZ /d "Your PC is being migrated to the $($tenant) tenant and will automatically reboot in 30 seconds.  Please do not power off." /f | Out-Host
 log "Lock screen caption set successfully."
 
+# Disable user ESP
+$SkipOOBE = get-childitem -path HKLM:\software\microsoft\enrollments\ -Recurse | Where-Object { $_.Property -match 'SkipUserStatusPage' }
+if ($SkipOOBE) 
+{
+    $Converted = Convert-Path $SkipOOBE.PSPath
+    New-ItemProperty -Path Registry::$Converted -Name SkipUserStatusPage  -Value 4294967295 -PropertyType DWORD -Force | Out-Null
+}
+else 
+{
+    log "SkipUserStatusPage not found."
+}
+
 # Stop transcript and restart
 log "$($pc.hostname) will reboot in 30 seconds..."
 Stop-Transcript
