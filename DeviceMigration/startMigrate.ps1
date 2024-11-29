@@ -438,7 +438,7 @@ $userLookup = $split[0]
 log "Looking up user where UPN starts with: $userLookup..."
 $newUserObject = Invoke-RestMethod -Method GET -Uri "https://graph.microsoft.com/beta/users?`$filter=startsWith(userPrincipalName,'$userLookup')" -Headers $newHeaders
 # if new user graph request is successful, set new user object
-if($null -ne $newUserObject.value)
+if([bool]$newUserObject.value)
 {
     log "New user found in $tenant tenant."
     $newUser = @{
@@ -570,7 +570,7 @@ else
 if($pc.mdm -eq $true)
 {
     log "Removing MDM enrollment..."
-    $enrollmentPath = "HKLM:\SOFTWARE\Microsoft\Enrollments"
+    $enrollmentPath = "HKLM:\SOFTWARE\Microsoft\Enrollments\"
     $enrollments = Get-ChildItem -Path $enrollmentPath
     foreach($enrollment in $enrollments)
     {
@@ -580,35 +580,35 @@ if($pc.mdm -eq $true)
         if($key)
         {
             log "Removing MDM enrollment $($enrollPath)..."
-            Remove-Item -Path $enrollPath -Recure
+            Remove-Item -Path $enrollPath -Recurse
+            $enrollId = $enrollPath.Split("\")[-1]
+            $additionalPaths = @(
+                "HKLM:\SOFTWARE\Microsoft\Enrollments\Status\$($enrollID)",
+                "HKLM:\SOFTWARE\Microsoft\EnterpriseResourceManager\Tracked\$($enrollID)",
+                "HKLM:\SOFTWARE\Microsoft\PolicyManager\AdmxInstalled\$($enrollID)",
+                "HKLM:\SOFTWARE\Microsoft\PolicyManager\Providers\$($enrollID)",
+                "HKLM:\SOFTWARE\Microsoft\Provinsioning\OMADM\Accounts\$($enrollID)",
+                "HKLM:\SOFTWARE\Microsoft\Provisioning\OMADM\Logger\$($enrollID)",
+                "HKLM:\SOFTWARE\Microsoft\Provisioning\OMADM\Sessions\$($enrollID)"
+            )
+            foreach($path in $additionalPaths)
+            {
+                if(Test-Path $path)
+                {
+                    log "Removing $($path)..."
+                    Remove-Item -Path $path -Recurse
+                    log "$($path) removed successfully."
+                }
+                else
+                {
+                    log "$($path) not present."
+                }
+            }
             log "MDM enrollment removed successfully."
         }
         else
         {
-            log "MDM enrollment not present."
-        }
-    }
-    $enrollId = $enrollPath.Split("\")[-1]
-    $additionalPaths = @(
-        "HKLM:\SOFTWARE\Microsoft\Enrollments\Status\$($enrollID)",
-        "HKLM:\SOFTWARE\Microsoft\EnterpriseResourceManager\Tracked\$($enrollID)",
-        "HKLM:\SOFTWARE\Microsoft\PolicyManager\AdmxInstalled\$($enrollID)",
-        "HKLM:\SOFTWARE\Microsoft\PolicyManager\Providers\$($enrollID)",
-        "HKLM:\SOFTWARE\Microsoft\Provinsioning\OMADM\Accounts\$($enrollID)",
-        "HKLM:\SOFTWARE\Microsoft\Provisioning\OMADM\Logger\$($enrollID)",
-        "HKLM:\SOFTWARE\Microsoft\Provisioning\OMADM\Sessions\$($enrollID)"
-    )
-    foreach($path in $additionalPaths)
-    {
-        if(Test-Path $path)
-        {
-            log "Removing $($path)..."
-            Remove-Item -Path $path -Recurse
-            log "$($path) removed successfully."
-        }
-        else
-        {
-            log "$($path) not present."
+            log "Not Intune node - skipping."
         }
     }
 }
@@ -672,10 +672,9 @@ else
 # Leave Domain/Hybrid Join
 $migrateAdmin = "MigrationInProgress"
 $adminPW = generatePassword
-$adminGroup = Get-CimInstance -Query "Select * From Win32_Group Where LocalAccount = True And SID = 'S-1-5-32-544'"
-$adminGroupName = $adminGroup.Name
 New-LocalUser -Name $migrateAdmin -Password $adminPW -PasswordNeverExpires
-Add-LocalGroupMember -Group $adminGroupName -Member $migrateAdmin
+$adminGroupSID = "S-1-5-32-544"
+Add-LocalGroupMember -Member $migrateAdmin -SID $adminGroupSID
 
 if($pc.domainJoined -eq "YES")
 {

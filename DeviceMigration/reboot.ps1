@@ -538,6 +538,19 @@ else
     log "Machine is domain joined - skipping updateSamNameIdentityStore."
 }
 
+# check Local Admin group
+$adminGroupSID = "S-1-5-32-544"
+log "Checking if previous user was in the local adminitrators group."
+$isAdmin = ($null -ne (Get-LocalGroupMember -SID $adminGroupSID | Where-Object SID -eq $OLD_SID))
+if($isAdmin)
+{
+    log "User found in local adminitrators group. Adding new user."
+    Add-LocalGroupMember -Member $NEW_SID -SID $adminGroupSID
+    log "New user added to local adminitrators group."
+} else {
+    log "User not found in local adminitrators group."
+}
+
 # enable logon provider
 reg.exe add "HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Authentication\Credential Providers\{60b78e88-ead8-445c-9cfd-0b87f74ea6cd}" /v "Disabled" /t REG_DWORD /d 0 /f | Out-Host
 log "Enabled logon provider."

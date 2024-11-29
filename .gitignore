@@ -1,0 +1,3 @@
+DeviceMigration/*.ppkg
+DeviceMigration/config.json
+DeviceMigration/startMigrate.intunewin
