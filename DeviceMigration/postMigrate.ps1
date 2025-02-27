@@ -7,9 +7,7 @@ USE
 .\postMigrate.ps1
 .OWNER
 Steve Weiner
-.CONTRIBUTORS
-Logan Lautt
-Jesse Weimer
+
 #>
 
 $ErrorActionPreference = "SilentlyContinue"
