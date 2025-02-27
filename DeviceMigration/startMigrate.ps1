@@ -10,9 +10,7 @@ NOTES
 When deploying with Microsoft Intune, the install command must be "%WinDir%\Sysnative\WindowsPowerShell\v1.0\powershell.exe -ExecutionPolicy Bypass -File startMigrate.ps1" to ensure the script runs in 64-bit mode.
 .OWNER
 Steve Weiner
-.CONTRIBUTORS
-Logan Lautt
-Jesse Weimer
+
 #>
 
 $ErrorActionPreference = "SilentlyContinue"
